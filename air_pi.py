@@ -186,7 +186,7 @@ class CentroidTracker:
 # -----------------------------------------------------------------------------------------------
 class AppState:
     def __init__(self):
-        self.tracker = CentroidTracker()
+        self.tracker = CentroidTracker(max_disappeared=10)
         self.target_id = None
         self.gst_error_event = threading.Event()
         self.command_thread_stop_event = threading.Event()
@@ -276,7 +276,10 @@ def on_new_hailo_sample(appsink, app_state):
 
 
         object_labels = ["car", "truck", "bus", "motorbike", "person"]
-        filtered_detections = [det for det in detections if det.get_label() in object_labels]
+        MIN_CONFIDENCE = 0.3
+        MIN_BBOX_AREA = 1000
+        
+        filtered_detections = [det for det in detections if det.get_label() in object_labels and det.get_confidence() >= MIN_CONFIDENCE]
 
 
         # for det in filtered_detections:
@@ -321,11 +324,15 @@ def on_new_hailo_sample(appsink, app_state):
             xmax = int(xmax * scale_x)
             ymax = int(ymax * scale_y)
 
+            if (xmax - xmin) * (ymax - ymin) < MIN_BBOX_AREA:
+                continue
+
 
             current_detections_info.append({
                 'bbox': (xmin, ymin, xmax, ymax),
                 'centroid': (int((xmin + xmax) / 2.0), int((ymin + ymax) / 2.0)),
                 'label': det.get_label()
+                'confidence': det.get_confidence()
             })
 
 
