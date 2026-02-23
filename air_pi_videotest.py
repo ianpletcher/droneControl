@@ -26,9 +26,9 @@ def run_gstreamer(main_loop):
         "h264parse ! "
         "rtph264pay config-interval=10 pt=96 ! "
         f"udpsink host={GROUND_STATION_IP} port={VIDEO_STREAM_PORT} sync=false async=false"
-    )
+    ) #linux command that runs gStreamer pipeline on Raspberry Pi 5
 
-    print(f"Pipeline:\n{pipeline_str}\n")
+    print(f"Pipeline:\n{pipeline_str}\n") #Printing the pipeline command string for confirmation.
 
     pipeline = None
     try:
@@ -37,7 +37,7 @@ def run_gstreamer(main_loop):
         bus = pipeline.get_bus()
         bus.add_signal_watch()
 
-        def on_message(bus, message):
+        def on_message(bus, message): #pipeline message
             t = message.type
             if t == Gst.MessageType.ERROR:
                 err, debug = message.parse_error()
@@ -51,7 +51,7 @@ def run_gstreamer(main_loop):
                     old, new, _ = message.parse_state_changed()
                     print(f"Pipeline state: {old.value_nick} → {new.value_nick}")
 
-        bus.connect("message", on_message)
+        bus.connect("message", on_message) #Connect message signal to on_message callback function
 
         ret = pipeline.set_state(Gst.State.PLAYING)
         if ret == Gst.StateChangeReturn.FAILURE:
@@ -72,14 +72,14 @@ def run_gstreamer(main_loop):
 # Main
 # -----------------------------------------------------------------------------------------------
 def main():
-    Gst.init(None)
-    main_loop = GLib.MainLoop()
+    Gst.init(None) #initialize gStreamer library
+    main_loop = GLib.MainLoop() #loop manager
 
     print("=== Air Pi — Video Smoke Test ===")
     print(f"Streaming to: {GROUND_STATION_IP}:{VIDEO_STREAM_PORT}")
     print("Press Ctrl+C to stop.\n")
 
-    gst_thread = threading.Thread(target=run_gstreamer, args=(main_loop,), daemon=True)
+    gst_thread = threading.Thread(target=run_gstreamer, args=(main_loop,), daemon=True) #gStreamer thread
     gst_thread.start()
 
     try:
