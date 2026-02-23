@@ -17,10 +17,10 @@ import time
 # -----------------------------------------------------------------------------------------------
 # NOTE: This Pi's IP is 192.168.0.169.
 # We are listening on all interfaces (0.0.0.0).
-AIR_PI_IP = "192.168.0.170"      # IP of the Air Pi (for sending commands to)
-VIDEO_STREAM_PORT = 5000         # Port to listen on for H.264 video
-DATA_PORT = 5001                 # Port to listen on for tracking data
-COMMAND_PORT = 5002              # Port on the Air Pi to send commands to
+AIR_PI_IP = "10.5.0.2"      # IP of the Air Pi (for sending commands to)
+VIDEO_STREAM_PORT = 5602         # Port to listen on for H.264 video
+DATA_PORT = 5601                # Port to listen on for tracking data
+COMMAND_PORT = 5603              # Port on the Air Pi to send commands to
 
 
 
@@ -57,7 +57,7 @@ def run_gstreamer_receiver(app_state, main_loop):
     # This pipeline receives the H.264 stream, decodes it, and sends it to our app
     # FIXED: Added proper jitter buffer, timestamps, and latency management
     pipeline_str = (
-        f"udpsrc port={VIDEO_STREAM_PORT} caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264,payload=96\" ! "
+        f"udpsrc port=5602 caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264,payload=96\" ! "
         "rtpjitterbuffer latency=50 drop-on-latency=true ! "  # Low latency jitter buffer
         "rtph264depay ! "
         "h264parse ! "
