@@ -258,7 +258,7 @@ def on_new_hailo_sample(appsink, app_state):
 
     caps = sample.get_caps()
     structure = caps.get_structure(0)
-    width = structure.get_value('width')
+    width = structure.get_value('width') #These are wrong
     height = structure.get_value('height')
 
 
@@ -655,5 +655,3 @@ def main():
 
 if __name__ == "__main__":
     main()
-
-
