@@ -331,7 +331,7 @@ def on_new_hailo_sample(appsink, app_state):
             current_detections_info.append({
                 'bbox': (xmin, ymin, xmax, ymax),
                 'centroid': (int((xmin + xmax) / 2.0), int((ymin + ymax) / 2.0)),
-                'label': det.get_label()
+                'label': det.get_label(),
                 'confidence': det.get_confidence()
             })
 
