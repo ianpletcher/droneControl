@@ -16,6 +16,7 @@ import math
 import time
 import copy
 from pathlib import Path
+
 # -----------------------------------------------------------------------------------------------
 # Network Configuration
 # -----------------------------------------------------------------------------------------------
@@ -27,12 +28,6 @@ from pathlib import Path
 # DATA_PORT = 5601
 # COMMAND_PORT = 5603
 
-# Each UDP fragment must stay below the path MTU.
-# 1400 bytes gives comfortable headroom for IP + UDP + WFB-NG overhead.
-PACKET_MAX_BYTES  = 1400
-PACKET_HEADER_FMT = "!I H H"   # seq (uint32), frag_idx (uint16), frag_count (uint16)
-PACKET_HEADER_LEN = struct.calcsize(PACKET_HEADER_FMT)   # 8 bytes
-PACKET_MAX_PAYLOAD = PACKET_MAX_BYTES - PACKET_HEADER_LEN
 
 
 # Load configuration from `config.toml` if available. Uses stdlib tomllib
@@ -65,25 +60,67 @@ COMMAND_PORT = int(_NET.get("command_port", 5603))
 # -----------------------------------------------------------------------------------------------
 # Telemetry Sender
 # -----------------------------------------------------------------------------------------------
+
+"""
+    Possibly make the function react to signal strength and reduce the size of the packets?
+    This might help reduce data loss at greater distances.
+    Will make the video choppier, but useful as a failsafe. 
+    Maybe after a certain number of failed sends it 
+    will switch to low bandwidth mode and reduce the size of the packets being sent.
+    Also need a failsafe to prevent drone from crashing if connection is lost.
+    Have it hover in place after a certain number of failed sends and return to home locaiton after a longer timeout.
+    Maybe give it 30 - 60 secs. Maybe need to vary this based on battery level and distance.
+    A function to calculate travel time back home based on battery would be good. 
+    We would need to first understand the complete power draw under load for the drone.
+    Calculate that into remaining flight time so we can avoid losing the drone."""
+
+# Each UDP fragment must stay below the path MTU.
+# 1400 bytes gives comfortable headroom for IP + UDP + WFB-NG overhead.
+PACKET_MAX_BYTES  = 1400 # 
+PACKET_HEADER_FMT = "!IHH"   #seq (I = uint32), frag_idx (H = uint16), frag_count (H = uint16)
+PACKET_HEADER_LEN = struct.calcsize(PACKET_HEADER_FMT)   # 8 bytes
+PACKET_MAX_PAYLOAD = PACKET_MAX_BYTES - PACKET_HEADER_LEN
+
 def send_telemetry_udp(sock, addr, seq, data_bytes):
-    """
-    Fragment data_bytes into MTU-safe UDP datagrams and send them.
 
-    Every datagram carries an 8-byte header:
-        seq        (uint32) message sequence number
-        frag_idx   (uint16) 0-based index of this fragment
-        frag_count (uint16) total fragments for this message
-
-    The receiver uses seq to discard stale messages and frag_idx/frag_count
-    to reassemble fragments before deserialising.
+    #Need to add fragment cap and catch excess frags. Maybe 4 bytes of fragments?
     """
-    frag_count = max(1, math.ceil(len(data_bytes) / PACKET_MAX_PAYLOAD))
-    for frag_idx in range(frag_count):
-        start  = frag_idx * PACKET_MAX_PAYLOAD
-        chunk  = data_bytes[start : start + PACKET_MAX_PAYLOAD]
-        header = struct.pack(PACKET_HEADER_FMT, seq & 0xFFFFFFFF, frag_idx, frag_count)
-        sock.sendto(header + chunk, addr)
-    # DOES NOT CATCH ANY EXCEPTIONS
+    Packets must be smaller than 1446 bytes to avoid fragmentation.
+    8 byte header + 1392 byte payload = 1400 byte total per UDP datagram.
+    Header = seq (uint32) +frag_id (uint16) + frag_count (uint16)
+    The receiver uses seq to discard stale messages and frag_id/frag_count to reassemble fragments before deserialising.
+    """
+
+    def _pack_fragments(seq, payload_bytes): #payload (determined) + header (8 bytes)
+        if not isinstance(payload_bytes, (bytes, bytearray)): #checks if a payload object is bytes or bytearray
+            raise TypeError("data_bytes must be bytes or bytearray")
+        
+        total = len(payload_bytes)
+        if total == 0:
+            frag_count = 1 # empty fragment, aka a datagram (packet)
+        else:
+            frag_count = int(math.ceil(total / PACKET_MAX_PAYLOAD)) # from bytes divided by payload max
+
+        for frag_id in range(frag_count):
+            start = frag_id * PACKET_MAX_PAYLOAD # Index of payload start in array
+            payload = payload_bytes[start:start + PACKET_MAX_PAYLOAD] # Slice from array = payload content
+            header = struct.pack(PACKET_HEADER_FMT, seq & 0xFFFFFFFF, frag_id, frag_count) 
+            yield header + payload
+
+    # Send each fragment and handle errors per-fragment. Return True only if all fragments were sent.
+    
+    try:
+        for frag_id, packet in enumerate(_pack_fragments(seq, data_bytes)):
+            try:
+                sock.sendto(packet, addr)
+            except socket.error as e:
+                print(f"send_telemetry_udp: sendto failed for frag {frag_id}: {e}", end='\r')
+                return False
+    except Exception as e:
+        print(f"send_telemetry_udp: error preparing fragments: {e}")
+        return False
+
+    return True
 
 # -----------------------------------------------------------------------------------------------
 # Drone Command Controller
