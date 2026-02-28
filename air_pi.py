@@ -14,6 +14,9 @@ import pickle
 import time
 import copy
 from pathlib import Path
+import asyncio
+from mavsdk import System
+from mavsdk.offboard import OffboardError, VelocityBodyYawSpeed
 
 
 # -----------------------------------------------------------------------------------------------
@@ -23,7 +26,7 @@ GROUND_STATION_IP = "10.5.0.1"
 VIDEO_STREAM_PORT = 5602
 DATA_PORT = 5601
 COMMAND_PORT = 5603
-
+SERIAL_PORT = "serial:///dev/ttyAMA0:921600"  #to be changed, currently a placeholder
 
 # -----------------------------------------------------------------------------------------------
 # Drone Command Controller
@@ -192,6 +195,9 @@ class AppState:
         self.command_thread_stop_event = threading.Event()
         self.control_loop_stop_event = threading.Event()
         self.data_sender_stop_event = threading.Event()
+        self.mavsdk_stop_event = threading.Event()
+        self.drone_state = "MANUAL" 
+       
 
 
         self.frame_width = 0
@@ -201,6 +207,7 @@ class AppState:
         self.target_lock = threading.Lock()
         self.tracker_lock = threading.Lock()
         self.frame_size_lock = threading.Lock()
+        self.drone_state_lock = threading.Lock()
 
 
         self.data_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -409,45 +416,47 @@ def run_command_server(app_state):
 # -----------------------------------------------------------------------------------------------
 # Drone Control Loop (MAVLink) Thread
 # -----------------------------------------------------------------------------------------------
-def run_drone_control(app_state, drone_controller):
-    print("Drone control loop running (TEST MODE).")
+async def run_drone_control_async(app_state, drone_controller):
+    drone = System()
+    print(f"Connecting to drone on {SERIAL_PORT}...")
 
+    await drone.connect(system_address=SERIAL_PORT)
 
-    while not app_state.control_loop_stop_event.is_set():
+    async for state in drone.core.connection_state():
+        if state.is_connected:
+            print("Drone connected!")
+            break
+
+  
+    print("Waiting for drone to be ready...")
+    async for health in drone.telemetry.health():
+        if health.is_global_position_ok and health.is_home_position_ok:
+            print("Drone is ready.")
+            break
+
+    print("Starting in MANUAL mode. Click a target to engage autonomous tracking.")
+
+    hover_lost_time = None      
+    hold_start_time = None      
+
+    while not app_state.mavsdk_stop_event.is_set():
         try:
+            with app_state.drone_state_lock:
+                current_state = app_state.drone_state
+
+            with app_state.target_lock:
+                target_id = app_state.target_id
+
             with app_state.frame_size_lock:
                 frame_w = app_state.frame_width
                 frame_h = app_state.frame_height
 
-
             target_bbox = None
-            with app_state.target_lock:
-                target_id = app_state.target_id
-
-
             if target_id is not None:
                 with app_state.tracker_lock:
                     target_data = app_state.tracker.tracked_objects.get(target_id)
                     if target_data:
                         target_bbox = target_data['bbox']
-
-
-            forward_vel, up_vel, yaw_rate, command_string = drone_controller.compute_command(
-                target_bbox, frame_w, frame_h
-            )
-
-
-            print(f"  {command_string}        ", end='\r')
-
-
-            time.sleep(0.1)
-
-
-        except Exception as e:
-            if not app_state.control_loop_stop_event.is_set():
-                print(f"Drone control loop error: {e}")
-                time.sleep(1)
-
 
 
 
