@@ -1,6 +1,7 @@
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GObject, GLib
+# do we not need to specify gst_bin as gst?
 import os
 import sys
 import pygame
@@ -8,22 +9,67 @@ import numpy as np  # <-- ADDED THIS MISSING IMPORT
 import threading
 import socket
 import json
-import pickle
+import msgpack
+import struct
 import time
+import tomllib
 
+#Ideas for ground station: 
+# - Instead of just having users click on bbox to track, have a "selection mode" or a key on side of display. Make it hidden at first and popout with an arrow
+
+''' 
+Make sure camera stream is split 640*640 for AI processing and 1280*720 for display.
+Split the camera feed with a tee in GStreamer.
+Implement Multiplexing on the 2.4ghz 
+Use 5.0 as primary until range exceeds 5.0 capabilities, then switch to 2.4ghz
+Send Commands over TCP and Video over UDP.
+'''
 
 # -----------------------------------------------------------------------------------------------
-# Network Configuration
+# Network Configuration (configurable via config.toml)
 # -----------------------------------------------------------------------------------------------
+# Original hard-coded values (kept commented so you can revert if needed):
 # NOTE: This Pi's IP is 192.168.0.169.
 # We are listening on all interfaces (0.0.0.0).
-AIR_PI_IP = "10.5.0.2"      # IP of the Air Pi (for sending commands to)
-VIDEO_STREAM_PORT = 5602         # Port to listen on for H.264 video
-DATA_PORT = 5601                # Port to listen on for tracking data
-COMMAND_PORT = 5603              # Port on the Air Pi to send commands to
+# AIR_PI_IP = "10.5.0.2"      # IP of the Air Pi (for sending commands to)
+# VIDEO_STREAM_PORT = 5602    # Port to listen on for H.264 video
+# DATA_PORT = 5601            # Port to listen on for tracking data
+# COMMAND_PORT = 5603         # Port on the Air Pi to send commands to
+
+# Load configuration from `config.toml` (repo root) if available.
+def load_config(path=None):
+    path = path or os.environ.get("DRONE_CONFIG", "config.toml")
+    if not os.path.exists(path):
+        return {}
+    try:
+        import tomllib as _toml  # Python 3.11+
+        with open(path, "rb") as f:
+            return _toml.load(f)
+    except Exception:
+        try:
+            import tomllib as _toml  # toml parser
+            with open(path, "rb") as f:
+                return _toml.load(f)
+        except Exception:
+            return {}
 
 
+# Read config and apply defaults
+_CFG = load_config()
+_NET = _CFG.get("network", {})
+AIR_PI_IP = _NET.get("air_ip", "10.5.0.2")
+VIDEO_STREAM_PORT = int(_NET.get("video_port", 5602))
+DATA_PORT = int(_NET.get("data_port", 5601))
+COMMAND_PORT = int(_NET.get("command_port", 5603))
 
+# Must match the constants in air_pi.py exactly.
+PACKET_HEADER_FMT = "!I H H"   # seq (uint32), frag_idx (uint16), frag_count (uint16)
+PACKET_HEADER_LEN = struct.calcsize(PACKET_HEADER_FMT)   # 8 byte header 
+
+# Drop any reassembly buffer that has not completed within this time (seconds).
+# Default tuned for low-latency telemetry; can be overridden in config.toml
+_TEL = _CFG.get("telemetry", {})
+REASSEMBLY_TIMEOUT = float(_TEL.get("reassembly_timeout", 0.3))
 
 # -----------------------------------------------------------------------------------------------
 # Application State
@@ -32,21 +78,18 @@ class AppState:
     """Manages shared state between GStreamer and UI threads"""
    
     def __init__(self):
-        self.pygame_frame = None       # The most recent numpy frame
-        self.tracking_data = []      # The most recent tracking data
-        self.last_click_pos = None     # (x, y) tuple of the last click
-        self.current_target_id = None  # The ID we are currently tracking
-        self.gst_error_event = threading.Event() # Set if GStreamer fails
-        self.data_thread_stop_event = threading.Event()
+        self.pygame_frame = None                        # The most recent numpy frame
+        self.tracking_data = []                         # The most recent tracking data
+        self.last_click_pos = None                      # (x, y) tuple of the last click
+        self.current_target_id = None                   # The ID we are currently tracking
+        self.gst_error_event = threading.Event()        # Set if GStreamer fails
+        self.data_thread_stop_event = threading.Event() # Set to signal data thread to stop
        
-        # Thread locks
+        # Thread locks for synchronization
         self.frame_lock = threading.Lock()
         self.tracking_data_lock = threading.Lock()
         self.click_lock = threading.Lock()
         self.target_lock = threading.Lock()
-
-
-
 
 # -----------------------------------------------------------------------------------------------
 # GStreamer Video Receiver Thread
@@ -54,10 +97,13 @@ class AppState:
 def run_gstreamer_receiver(app_state, main_loop):
     """Run GStreamer in separate thread to receive and display video"""
    
+    # HEVC is more efficent, but I do not know technical specifics
+    # Could be that it's difficult to implement or more computationally intensive on one end. 
+
     # This pipeline receives the H.264 stream, decodes it, and sends it to our app
     # FIXED: Added proper jitter buffer, timestamps, and latency management
-    pipeline_str = (
-        f"udpsrc port=5602 caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264,payload=96\" ! "
+    pipeline_str = ( 
+        f"udpsrc port={VIDEO_STREAM_PORT} caps=\"application/x-rtp,media=video,clock-rate=90000,encoding-name=H264,payload=96\" ! "
         "rtpjitterbuffer latency=50 drop-on-latency=true ! "  # Low latency jitter buffer
         "rtph264depay ! "
         "h264parse ! "
@@ -68,6 +114,19 @@ def run_gstreamer_receiver(app_state, main_loop):
         "appsink name=appsink emit-signals=true sync=false max-buffers=1 drop=true"  # Drop old frames aggressively
     )
    
+    """  Notes for pipeline tuning and testing:
+   
+        max-buffers=1 + drop=true ensures your UI always shows the latest frame but sacrifices smoothness; 
+        increase max-buffers or remove drop=true for smoother playback if latency budget allows.
+        The caps must match the sender's RTP parameters; mismatches (payload type, resolution, framerate) 
+        can break decoding or require extra negotiation.
+        If debugging stream issues, temporarily raise rtpjitterbuffer latency (e.g., 100-200 ms) 
+        to see if artifacts are jitter-related.
+        
+    """
+
+#need to make pipeine string robust and variable if network conditions change.
+
     pipeline = None
     try:
         pipeline = Gst.parse_launch(pipeline_str)
@@ -79,7 +138,7 @@ def run_gstreamer_receiver(app_state, main_loop):
             raise RuntimeError("Missing appsink element")
            
         # Connect our callback
-        appsink.set_property('emit-signals', True)
+        # appsink.set_property('emit-signals', True) this is already set in pipe
         appsink.connect('new-sample', on_new_video_sample, app_state)
        
         # Set pipeline to PLAYING
@@ -117,6 +176,8 @@ def on_new_video_sample(appsink, app_state):
     # format = structure.get_string('format') # Should be RGB
    
     # Map buffer to readable numpy array
+
+    #buffer.map needs t obe initalized as none before the try otherwise we can get two exceptions thrown 
     try:
         (result, map_info) = buffer.map(Gst.MapFlags.READ)
         if result:
@@ -140,36 +201,97 @@ def on_new_video_sample(appsink, app_state):
        
     return Gst.FlowReturn.OK
 
-
 # -----------------------------------------------------------------------------------------------
 # Tracking Data Receiver Thread
 # -----------------------------------------------------------------------------------------------
+
+# need to modify for msgpack
+
 def run_data_receiver(app_state):
-    """Listens for UDP packets containing pickled tracking data"""
+    """
+    Listens for fragmented msgpack telemetry packets from the Air Pi.
+
+    Packet header (8 bytes, big-endian):
+        seq        (uint32) message sequence number, increments every frame
+        frag_idx   (uint16) 0-based index of this fragment within the message
+        frag_count (uint16) total fragments that make up this message
+
+    Packet-loss behaviour:
+        - If some fragments for a message never arrive, the message is silently
+          dropped after REASSEMBLY_TIMEOUT seconds.  The display keeps showing
+          the last fully-received set of bounding boxes no partial/corrupt
+          frames are ever rendered.
+        - Out-of-order or duplicate datagrams for already-processed messages
+          are discarded using the seq number.
+    """
+    # {seq: {'frags': {frag_idx: bytes}, 'total': int, 'first_seen': float}}
+    reassembly = {}
+    last_processed_seq = -1
+
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
-        s.bind(('', DATA_PORT)) # Listen on all interfaces
-        s.settimeout(1.0) # Set timeout so the loop can check for stop event
+        s.bind(('', DATA_PORT))
+        s.settimeout(1.0)   # allows the stop-event check on every timeout
         print(f"Data receiver listening on port {DATA_PORT}")
-       
+
         while not app_state.data_thread_stop_event.is_set():
             try:
-                data, addr = s.recvfrom(65536) # Max UDP packet size
-                if data:
-                    tracking_list = pickle.loads(data)
-                   
-                    with app_state.tracking_data_lock:
-                        app_state.tracking_data = tracking_list
-                       
+                data, addr = s.recvfrom(65536)
+
+                # ── Parse header ──────────────────────────────────────────────
+                if len(data) < PACKET_HEADER_LEN:
+                    continue   # runt packet, ignore
+
+                seq, frag_idx, frag_count = struct.unpack(
+                    PACKET_HEADER_FMT, data[:PACKET_HEADER_LEN]
+                )
+                payload = data[PACKET_HEADER_LEN:]
+
+                # ── Discard stale / duplicate datagrams ───────────────────────
+                if seq <= last_processed_seq:
+                    continue
+
+                # ── Buffer this fragment ──────────────────────────────────────
+                if seq not in reassembly:
+                    reassembly[seq] = {
+                        'frags':      {},
+                        'total':      frag_count,
+                        'first_seen': time.time(),
+                    }
+                reassembly[seq]['frags'][frag_idx] = payload
+
+                # ── Try to assemble once all fragments have arrived ───────────
+                entry = reassembly[seq]
+                if len(entry['frags']) == entry['total']:
+                    body = b''.join(
+                        entry['frags'][i] for i in range(entry['total'])
+                    )
+                    try:
+                        wrapper = msgpack.unpackb(body, raw=False)
+                        tracking_list = wrapper.get('objects', [])
+                        with app_state.tracking_data_lock:
+                            app_state.tracking_data = tracking_list
+                        last_processed_seq = seq
+                    except Exception as e:
+                        print(f"Failed to decode telemetry: {e}", end='\r')
+                    del reassembly[seq]
+
+                # ── Drop timed-out incomplete messages ────────────────────────
+                # Keeps last-known-good boxes on screen; never renders partials.
+                now = time.time()
+                stale_seqs = [
+                    s for s, e in reassembly.items()
+                    if now - e['first_seen'] > REASSEMBLY_TIMEOUT
+                ]
+                for stale_seq in stale_seqs:
+                    del reassembly[stale_seq]
+
             except socket.timeout:
-                continue # Normal timeout, loop again
-            except pickle.UnpicklingError:
-                print("Received corrupted tracking data packet", end='\r')
+                continue   # normal timeout, loop again
             except Exception as e:
                 if not app_state.data_thread_stop_event.is_set():
                     print(f"Data receiver error: {e}")
                     time.sleep(1)
-
 
 # -----------------------------------------------------------------------------------------------
 # Target Selection (Command Sender)
@@ -215,7 +337,6 @@ def send_command_to_air_pi(command_dict):
     except Exception as e:
         print(f"Error sending command: {e}")
 
-
 # -----------------------------------------------------------------------------------------------
 # Pygame UI Functions
 # -----------------------------------------------------------------------------------------------
@@ -243,21 +364,17 @@ def handle_input(events, ui_state, app_state, tracking_data):
                 ui_state['running'] = False
 
 
-
-
 def render_graphics(screen, frame, tracking_data, current_target_id, ui_state, fonts):
     """Render frame with tracking overlays"""
    
     if frame is None:
         # Display "Waiting for video" message
         screen.fill((30, 30, 30)) # Dark grey background
-        wait_text = "Waiting for video stream..."
-        text_surface = fonts['main'].render(wait_text, True, (255, 255, 255))
+        text_surface = fonts['main'].render("Waiting for video stream...", True, (255, 255, 255))
         text_rect = text_surface.get_rect(center=screen.get_rect().center)
         screen.blit(text_surface, text_rect)
         pygame.display.flip()
         return
-
 
     # Convert numpy array to pygame surface
     # The frame is already RGB, but GStreamer gives it to us rotated.
@@ -304,9 +421,6 @@ def render_graphics(screen, frame, tracking_data, current_target_id, ui_state, f
         y_offset += 25
    
     pygame.display.flip()
-
-
-
 
 # -----------------------------------------------------------------------------------------------
 # Main Function
@@ -398,9 +512,6 @@ def main():
         pygame.quit()
         print("Ground station stopped")
         sys.exit(0)
-
-
-
 
 if __name__ == "__main__":
     main()
