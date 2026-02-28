@@ -21,14 +21,13 @@ from pathlib import Path
 # Network Configuration
 # -----------------------------------------------------------------------------------------------
 
+# FIXME
 # Original hard-coded network constants (kept commented so they can be
 # restored easily if needed):
 # GROUND_STATION_IP = "10.5.0.1"
 # VIDEO_STREAM_PORT = 5602
 # DATA_PORT = 5601
 # COMMAND_PORT = 5603
-
-
 
 # Load configuration from `config.toml` if available. Uses stdlib tomllib
 # on Python 3.11+ or the `tomli` package on older Pythons.
@@ -74,9 +73,7 @@ COMMAND_PORT = int(_NET.get("command_port", 5603))
     We would need to first understand the complete power draw under load for the drone.
     Calculate that into remaining flight time so we can avoid losing the drone."""
 
-# Each UDP fragment must stay below the path MTU.
-# 1400 bytes gives comfortable headroom for IP + UDP + WFB-NG overhead.
-PACKET_MAX_BYTES  = 1400 # 
+PACKET_MAX_BYTES  = 1400 
 PACKET_HEADER_FMT = "!IHH"   #seq (I = uint32), frag_idx (H = uint16), frag_count (H = uint16)
 PACKET_HEADER_LEN = struct.calcsize(PACKET_HEADER_FMT)   # 8 bytes
 PACKET_MAX_PAYLOAD = PACKET_MAX_BYTES - PACKET_HEADER_LEN
@@ -168,15 +165,17 @@ class DroneCommandController:
         error_area = target_area - bbox_area
         # Proportional control for yaw, vertical, and forward velocities
         # np.clip limits (K * error, min, max)
+
+        #FIND WAY TO CHANGE TO MIN/MAX less overhead
         yaw_velocity = np.clip(self.YAW_GAIN * error_x, -self.MAX_YAW_RATE, self.MAX_YAW_RATE)
         up_velocity = np.clip(self.UP_DOWN_GAIN * error_y, -self.MAX_VERTICAL_VEL, self.MAX_VERTICAL_VEL)
         forward_velocity = np.clip(self.FORWARD_GAIN * error_area, -self.MAX_FORWARD_VEL, self.MAX_FORWARD_VEL)
         # should change names of up and forward to vertical and horizontal for clarity
- 
-        command_str = (
+
+        command_str = ( #INCREADLE OVERHEAD WHEN DRONE IS TRACKING
             f"TRACK: FWD={forward_velocity:.2f}m/s | "
             f"UP={up_velocity:.2f}m/s | YAW={yaw_velocity:.2f}°/s"
-        )
+        ) # TODO Change to logging and send this data back to grround station to display
 
         return forward_velocity, up_velocity, yaw_velocity, command_str
 
@@ -359,22 +358,6 @@ def on_new_hailo_sample(appsink, app_state):
         MIN_BBOX_AREA = 1000 # ~32*32 pixels out of 640*640
         
         filtered_detections = [det for det in detections if det.get_label() in object_labels and det.get_confidence() >= MIN_CONFIDENCE]
-
-
-        # for det in filtered_detections:
-        #     bbox_raw = det.get_bbox()
-        #     xmin = int(bbox_raw.xmin() * width)
-        #     ymin = int(bbox_raw.ymin() * height)
-        #     xmax = int(bbox_raw.xmax() * width)
-        #     ymax = int(bbox_raw.ymax() * height)
-
-
-        #     current_detections_info.append({
-        #         'bbox': (xmin, ymin, xmax, ymax),
-        #         'centroid': (int((xmin + xmax) / 2.0), int((ymin + ymax) / 2.0)),
-        #         'label': det.get_label()
-        #     })
-
 
         # AI inference resolution
         ai_w, ai_h = 640, 640
