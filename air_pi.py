@@ -21,6 +21,8 @@ from pathlib import Path
 # Network Configuration
 # -----------------------------------------------------------------------------------------------
 
+# TODO Creating Logging for crucial methods 
+
 # FIXME
 # Original hard-coded network constants (kept commented so they can be
 # restored easily if needed):
@@ -61,20 +63,20 @@ COMMAND_PORT = int(_NET.get("command_port", 5603))
 # -----------------------------------------------------------------------------------------------
 
 """
-    Possibly make the function react to signal strength and reduce the size of the packets?
-    This might help reduce data loss at greater distances.
-    Will make the video choppier, but useful as a failsafe. 
-    Maybe after a certain number of failed sends it 
-    will switch to low bandwidth mode and reduce the size of the packets being sent.
-    Also need a failsafe to prevent drone from crashing if connection is lost.
-    Have it hover in place after a certain number of failed sends and return to home locaiton after a longer timeout.
-    Maybe give it 30 - 60 secs. Maybe need to vary this based on battery level and distance.
-    A function to calculate travel time back home based on battery would be good. 
-    We would need to first understand the complete power draw under load for the drone.
+    Function needs to reac to signal strength. Change packet size based on this.
+    Could help more reliability over UDP + distance
+    
+    Number of failed sends, then switch to low bandwidth mode and recuce packet size.
+
+    Need failsafe for disconnection.
+    Hover in place when disconnected, then return home after 30-60 sec timeout.
+
+    Make function to calc travel time back home based on battery.
+    Need to understand battery drain and total capacity based on factors. 
     Calculate that into remaining flight time so we can avoid losing the drone."""
 
 PACKET_MAX_BYTES  = 1400 
-PACKET_HEADER_FMT = "!IHH"   #seq (I = uint32), frag_idx (H = uint16), frag_count (H = uint16)
+PACKET_HEADER_FMT = "!IHH"   #seq (I = uint32), frag_id (H = uint16), frag_count (H = uint16)
 PACKET_HEADER_LEN = struct.calcsize(PACKET_HEADER_FMT)   # 8 bytes
 PACKET_MAX_PAYLOAD = PACKET_MAX_BYTES - PACKET_HEADER_LEN
 
@@ -84,17 +86,17 @@ def send_telemetry_udp(sock, addr, seq, data_bytes):
     """
     Packets must be smaller than 1446 bytes to avoid fragmentation.
     8 byte header + 1392 byte payload = 1400 byte total per UDP datagram.
-    Header = seq (uint32) +frag_id (uint16) + frag_count (uint16)
+    Header = seq (uint32) + frag_id (uint16) + frag_count (uint16)
     The receiver uses seq to discard stale messages and frag_id/frag_count to reassemble fragments before deserialising.
     """
 
-    def _pack_fragments(seq, payload_bytes): #payload (determined) + header (8 bytes)
-        if not isinstance(payload_bytes, (bytes, bytearray)): #checks if a payload object is bytes or bytearray
+    def _pack_fragments(seq, payload_bytes): 
+        if not isinstance(payload_bytes, (bytes, bytearray)): #checks payload object is bytes/bytearray
             raise TypeError("data_bytes must be bytes or bytearray")
         
         total = len(payload_bytes)
         if total == 0:
-            frag_count = 1 # empty fragment, aka a datagram (packet)
+            frag_count = 1 # empty fragment = datagram (packet)
         else:
             frag_count = int(math.ceil(total / PACKET_MAX_PAYLOAD)) # from bytes divided by payload max
 
@@ -410,13 +412,35 @@ def on_new_hailo_sample(appsink, app_state):
         with app_state.target_lock:
             current_target_id = app_state.target_id
         # Sending to serializer
-        data_to_send = [
-            {'id': oid, **data, 'is_target': (oid == current_target_id)}
-            for oid, data in tracked_objects_copy.items()
-        ]
+        # Ensure all values are native Python types (no numpy types) so msgpack
+        # serialization is robust on the receiver side. Explicitly coerce fields.
+        data_to_send = []
+        for oid, data in tracked_objects_copy.items():
+            bbox = data.get('bbox')
+            centroid = data.get('centroid')
+            item = {
+                'id': int(oid),
+                'bbox': (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])) if bbox is not None else None,
+                'centroid': (int(centroid[0]), int(centroid[1])) if centroid is not None else None,
+                'label': str(data.get('label')) if data.get('label') is not None else None,
+                'confidence': float(data.get('confidence')) if data.get('confidence') is not None else None,
+                'is_target': bool(oid == current_target_id),
+            }
+            # Merge any other small, safe fields that are already serializable
+            for k, v in data.items():
+                if k in ('bbox', 'centroid', 'label', 'confidence'):
+                    continue
+                try:
+                    # keep only simple built-ins (int/float/str/bool/list/dict)
+                    if isinstance(v, (int, float, str, bool, list, dict, type(None))):
+                        item[k] = v
+                except Exception:
+                    pass
+            data_to_send.append(item)
 # -----------------------------------------------------------------------------------------------
-# Serialization of GStreamer
+# Serialization of Metadata
 # -----------------------------------------------------------------------------------------------
+# Add more telemetry data as needed, such as frame timestamp, processing latency, etc.
 
         app_state.seq += 1
         # Build the telemetry envelope
@@ -435,8 +459,9 @@ def on_new_hailo_sample(appsink, app_state):
         print(f"Network send error: {e}", end='\r')
     except Exception as e:
         print(f"Error sending tracking data: {e}")
-    """Is this correct syntax?"""
     return Gst.FlowReturn.OK
+
+"""Is this correct syntax?"""
 
 # -----------------------------------------------------------------------------------------------
 # Ground Station Command Receiver Thread
@@ -496,6 +521,9 @@ def run_drone_control(app_state, drone_controller):
                         target_bbox = target_data['bbox']
     # scope issues with variables
     # modify target_bbox to accept None
+
+
+    # FIXME: unused arguments
             forward_velocity, up_velocity, yaw_velocity, command_str = drone_controller.compute_command(
                 target_bbox, frame_w, frame_h
             )

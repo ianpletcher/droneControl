@@ -63,7 +63,7 @@ DATA_PORT = int(_NET.get("data_port", 5601))
 COMMAND_PORT = int(_NET.get("command_port", 5603))
 
 # Must match the constants in air_pi.py exactly.
-PACKET_HEADER_FMT = "!I H H"   # seq (uint32), frag_idx (uint16), frag_count (uint16)
+PACKET_HEADER_FMT = "!I H H"   # seq (uint32), frag_id (uint16), frag_count (uint16)
 PACKET_HEADER_LEN = struct.calcsize(PACKET_HEADER_FMT)   # 8 byte header 
 
 # Drop any reassembly buffer that has not completed within this time (seconds).
@@ -213,7 +213,7 @@ def run_data_receiver(app_state):
 
     Packet header (8 bytes, big-endian):
         seq        (uint32) message sequence number, increments every frame
-        frag_idx   (uint16) 0-based index of this fragment within the message
+        frag_id   (uint16) 0-based index of this fragment within the message
         frag_count (uint16) total fragments that make up this message
 
     Packet-loss behaviour:
@@ -224,7 +224,7 @@ def run_data_receiver(app_state):
         - Out-of-order or duplicate datagrams for already-processed messages
           are discarded using the seq number.
     """
-    # {seq: {'frags': {frag_idx: bytes}, 'total': int, 'first_seen': float}}
+    # {seq: {'frags': {frag_id: bytes}, 'total': int, 'first_seen': float}}
     reassembly = {}
     last_processed_seq = -1
 
@@ -242,7 +242,7 @@ def run_data_receiver(app_state):
                 if len(data) < PACKET_HEADER_LEN:
                     continue   # runt packet, ignore
 
-                seq, frag_idx, frag_count = struct.unpack(
+                seq, frag_id, frag_count = struct.unpack(
                     PACKET_HEADER_FMT, data[:PACKET_HEADER_LEN]
                 )
                 payload = data[PACKET_HEADER_LEN:]
@@ -258,7 +258,7 @@ def run_data_receiver(app_state):
                         'total':      frag_count,
                         'first_seen': time.time(),
                     }
-                reassembly[seq]['frags'][frag_idx] = payload
+                reassembly[seq]['frags'][frag_id] = payload
 
                 # ── Try to assemble once all fragments have arrived ───────────
                 entry = reassembly[seq]
