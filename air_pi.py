@@ -284,6 +284,8 @@ class AppState:
         self.command_thread_stop_event = threading.Event()
         self.control_loop_stop_event = threading.Event()
         self.data_sender_stop_event = threading.Event()
+        self.mavsdk_stop_event = threading.Event()
+        self.drone_state = "MANUAL" 
         # Initial frame dimensions to be updated by Gstreamer thread
         self.frame_width = 0
         self.frame_height = 0
@@ -291,6 +293,7 @@ class AppState:
         self.target_lock = threading.Lock()
         self.tracker_lock = threading.Lock()
         self.frame_size_lock = threading.Lock()
+        self.drone_state_lock = threading.Lock()
         # UDP socket 
         self.data_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) # no SO_SNDBUF increase needed due to fragmentation at send_telemetry_udp level
         self.seq = 0                           # Telemetry message counter
@@ -360,6 +363,21 @@ def on_new_hailo_sample(appsink, app_state):
         MIN_BBOX_AREA = 1000 # ~32*32 pixels out of 640*640
         
         filtered_detections = [det for det in detections if det.get_label() in object_labels and det.get_confidence() >= MIN_CONFIDENCE]
+
+        # for det in filtered_detections:
+        #     bbox_raw = det.get_bbox()
+        #     xmin = int(bbox_raw.xmin() * width)
+        #     ymin = int(bbox_raw.ymin() * height)
+        #     xmax = int(bbox_raw.xmax() * width)
+        #     ymax = int(bbox_raw.ymax() * height)
+
+
+        #     current_detections_info.append({
+        #         'bbox': (xmin, ymin, xmax, ymax),
+        #         'centroid': (int((xmin + xmax) / 2.0), int((ymin + ymax) / 2.0)),
+        #         'label': det.get_label()
+        #     })
+
 
         # AI inference resolution
         ai_w, ai_h = 640, 640
@@ -500,6 +518,7 @@ def run_command_server(app_state):
 # -----------------------------------------------------------------------------------------------
 # Drone Control Loop (MAVLink) Thread
 # -----------------------------------------------------------------------------------------------
+"""
 def run_drone_control(app_state, drone_controller):
     print("Drone control loop running (TEST MODE).")
 
@@ -527,7 +546,7 @@ def run_drone_control(app_state, drone_controller):
             forward_velocity, up_velocity, yaw_velocity, command_str = drone_controller.compute_command(
                 target_bbox, frame_w, frame_h
             )
-            """Mofify to print when the abs changes by 0.5 or so"""
+            # Mofify to print when the abs changes by 0.5 or so
             print(f"{command_str}", end='\r') #might be heavy, since it prints every single command.
             # modfify to log or print in interval.
 
@@ -536,7 +555,52 @@ def run_drone_control(app_state, drone_controller):
         except Exception as e:
             if not app_state.control_loop_stop_event.is_set():
                 print(f"Drone control loop error: {e}")
-                time.sleep(1)
+                time.sleep(1) 
+"""
+
+async def run_drone_control_async(app_state, drone_controller):
+    drone = System()
+    print(f"Connecting to drone on {SERIAL_PORT}...")
+
+    await drone.connect(system_address=SERIAL_PORT)
+
+    async for state in drone.core.connection_state():
+        if state.is_connected:
+            print("Drone connected!")
+            break
+
+  
+    print("Waiting for drone to be ready...")
+    async for health in drone.telemetry.health():
+        if health.is_global_position_ok and health.is_home_position_ok:
+            print("Drone is ready.")
+            break
+
+    print("Starting in MANUAL mode. Click a target to engage autonomous tracking.")
+
+    hover_lost_time = None      
+    hold_start_time = None      
+
+    while not app_state.mavsdk_stop_event.is_set():
+        try:
+            with app_state.drone_state_lock:
+                current_state = app_state.drone_state
+
+            with app_state.target_lock:
+                target_id = app_state.target_id
+
+            with app_state.frame_size_lock:
+                frame_w = app_state.frame_width
+                frame_h = app_state.frame_height
+
+            target_bbox = None
+            if target_id is not None:
+                with app_state.tracker_lock:
+                    target_data = app_state.tracker.tracked_objects.get(target_id)
+                    if target_data:
+                        target_bbox = target_data['bbox']
+
+
 
 # -----------------------------------------------------------------------------------------------
 # Main Function
@@ -709,6 +773,12 @@ def main():
         print("Waiting for threads to join...")
         for t in threads:
             t.join(timeout=3)
+
+        """        
+        gst_thread.join(timeout=3)
+        command_thread.join(timeout=2)
+        control_thread.join(timeout=2)
+        """
 
         # Close the UDP socket
         app_state.data_socket.close()
