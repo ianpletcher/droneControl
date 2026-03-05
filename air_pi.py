@@ -258,10 +258,9 @@ def on_new_hailo_sample(appsink, app_state):
 
     caps = sample.get_caps()
     structure = caps.get_structure(0)
-    width = structure.get_value('width') #These are wrong
-    height = structure.get_value('height')
-
-
+    
+    width, height = 640, 640
+    
     with app_state.frame_size_lock:
         if app_state.frame_width != width or app_state.frame_height != height:
             app_state.frame_width = width
