@@ -4,7 +4,7 @@ from gi.repository import Gst, GObject, GLib
 # do we not need to specify gst_bin as gst?
 import os
 import sys
-import pygame
+import pygame #rendering UI
 import numpy as np  # <-- ADDED THIS MISSING IMPORT
 import threading
 import socket
@@ -12,7 +12,7 @@ import json
 import msgpack
 import struct
 import time
-import tomllib
+import tomllib # For loading config.toml (Python 3.11+)
 
 #Ideas for ground station: 
 # - Instead of just having users click on bbox to track, have a "selection mode" or a key on side of display. Make it hidden at first and popout with an arrow
@@ -31,7 +31,9 @@ Send Commands over TCP and Video over UDP.
 # Original hard-coded values (kept commented so you can revert if needed):
 # NOTE: This Pi's IP is 192.168.0.169.
 # We are listening on all interfaces (0.0.0.0).
-# AIR_PI_IP = "10.5.0.2"      # IP of the Air Pi (for sending commands to)
+
+
+# RADXA_GADGET_IP = "10.5.0.2"      # IP of the Air Pi (for sending commands to)
 # VIDEO_STREAM_PORT = 5602    # Port to listen on for H.264 video
 # DATA_PORT = 5601            # Port to listen on for tracking data
 # COMMAND_PORT = 5603         # Port on the Air Pi to send commands to
@@ -57,7 +59,7 @@ def load_config(path=None):
 # Read config and apply defaults
 _CFG = load_config()
 _NET = _CFG.get("network", {})
-AIR_PI_IP = _NET.get("air_ip", "10.5.0.2")
+RADXA_GADGET_IP = _NET.get("air_ip", "10.5.0.2")
 VIDEO_STREAM_PORT = int(_NET.get("video_port", 5602))
 DATA_PORT = int(_NET.get("data_port", 5601))
 COMMAND_PORT = int(_NET.get("command_port", 5603))
@@ -131,7 +133,23 @@ def run_gstreamer_receiver(app_state, main_loop):
     try:
         pipeline = Gst.parse_launch(pipeline_str)
        
-        # Find the appsink
+       # Bus message handler for GStreamer errors and warnings
+        bus = pipeline.get_bus()
+        bus.add_signal_watch()
+
+        def on_message(bus, message):
+            t = message.type
+            if t == Gst.MessageType.ERROR:
+                err, debug = message.parse_error()
+                print(f"GStreamer ERROR: {err}, {debug}")
+                app_state.gst_error_event.set()
+                main_loop.quit()
+            elif t == Gst.MessageType.WARNING:
+                err, debug = message.parse_warning()
+                print(f"GStreamer WARNING: {err}, {debug}")
+        
+        bus.connect("message", on_message)
+
         appsink = pipeline.get_by_name("appsink")
         if not appsink:
             print("ERROR: Could not find 'appsink' element in pipeline.")
@@ -163,25 +181,23 @@ def on_new_video_sample(appsink, app_state):
     sample = appsink.emit('pull-sample')
     if not sample:
         return Gst.FlowReturn.OK
-       
+
+    # Extract buffer   
     buffer = sample.get_buffer()
     if not buffer:
         return Gst.FlowReturn.OK
    
-    # Get frame size and format from caps
+    # Get video frame dimensions from GStreamer caps
     caps = sample.get_caps()
     structure = caps.get_structure(0)
     width = structure.get_value('width')
     height = structure.get_value('height')
-    # format = structure.get_string('format') # Should be RGB
    
-    # Map buffer to readable numpy array
-
-    #buffer.map needs t obe initalized as none before the try otherwise we can get two exceptions thrown 
+    # Map the buffer to access pixel data and convert to numpy array
     try:
         (result, map_info) = buffer.map(Gst.MapFlags.READ)
         if result:
-            # Create numpy array from buffer
+             # Create a numpy array that shares memory with the GStreamer buffer
             numpy_frame = np.ndarray(
                 (height, width, 3),
                 buffer=map_info.data,
@@ -206,6 +222,35 @@ def on_new_video_sample(appsink, app_state):
 # -----------------------------------------------------------------------------------------------
 
 # need to modify for msgpack
+
+"""
+def run_data_receiver(app_state):
+    #Listens for UDP packets containing pickled tracking data
+    # Drone sends pickled list of dicts for tracking data
+    with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
+        s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
+        s.bind(('', DATA_PORT))
+        s.settimeout(1.0)
+        print(f"Data receiver listening on port {DATA_PORT}")
+
+        while not app_state.data_thread_stop_event.is_set():
+            try:
+                data, addr = s.recvfrom(65536)
+                if data:
+                    tracking_list = pickle.loads(data)
+                    with app_state.tracking_data_lock:
+                        app_state.tracking_data = tracking_list
+
+            except socket.timeout:
+                continue
+            except pickle.UnpicklingError:
+                print("Received corrupted tracking data packet", end='\r')
+            except Exception as e:
+                if not app_state.data_thread_stop_event.is_set():
+                    print(f"Data receiver error: {e}")
+                    time.sleep(1)
+
+"""
 
 def run_data_receiver(app_state):
     """
@@ -303,7 +348,10 @@ def select_target_by_click(click_pos, tracking_data, app_state):
     new_target_id = None
    
     for data in tracking_data:
+        # Setting starting and ending coordinates of bounding box from tracking data
         (start_x, start_y, end_x, end_y) = data['bbox']
+
+        # If the click position is within the bounding box, we have found a target
         if start_x < click_pos[0] < end_x and start_y < click_pos[1] < end_y:
             new_target_id = data['id']
             found_target = True
@@ -317,7 +365,7 @@ def select_target_by_click(click_pos, tracking_data, app_state):
     else:
         print("Clicked empty space, clearing target.")
        
-    # Send command to Air Pi
+    # Not really sending directly to Air Pi, maybe change name?
     send_command_to_air_pi({'target_id': new_target_id})
 
 
@@ -326,7 +374,7 @@ def send_command_to_air_pi(command_dict):
     try:
         with socket.socket(socket.AF_INET, socket.SOCK_STREAM) as s:
             s.settimeout(2.0) # 2-second timeout
-            s.connect((AIR_PI_IP, COMMAND_PORT))
+            s.connect((RADXA_GADGET_IP, COMMAND_PORT))
             command_json = json.dumps(command_dict)
             s.sendall(command_json.encode('utf-8'))
             print(f"Sent command to Air Pi: {command_json}")
@@ -443,6 +491,9 @@ def main():
     # Start Data receiver in separate thread
     data_thread = threading.Thread(target=run_data_receiver, args=(app_state,), daemon=True)
     data_thread.start()
+
+    # Set to use Cocoa video driver for macOS, may need adjustment for other platforms
+    os.environ.setdefault('SDL_VIDEODRIVER', 'cocoa')
    
     # Initialize pygame
     pygame.init()
