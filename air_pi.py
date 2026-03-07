@@ -4,92 +4,214 @@ from gi.repository import Gst, GLib
 import os
 import sys
 import numpy as np
-import hailo
+import hailo # Hailo SDK for AI inference and ROI processing
+# Collections and async
 from collections import OrderedDict
+import asyncio
 import threading
 from scipy.spatial.distance import cdist
 import socket
 import json
-import pickle
+import msgpack
+import struct
+import math
 import time
-import copy
+import copy 
+import tomllib #or tomli?
+from mavsdk import System
 from pathlib import Path
 
+"""Optimizations needed:
+    Reduce dictionary lookups and deep copies, deep copy has been removed.
+    Cache values and references to avoid repeated lookups (e.g. app_state.tracker.tracked_objects)
+    Sanitize values earlier to avoid overhead in critical loops
+    Reduce print/logging overhead (only log on significant changes or intervals)
+    Batch telemetry data to allow more bandwith to camer stream
+    Reuse buffers
+    Move more worth to Numpy for faster processing (currently most is in Python loops)
+    Profile to find bottlenecks and optimize those (e.g. using Cython or Numba for critical sections if needed)
+    - time.perf_counter()
+
+"""
 
 # -----------------------------------------------------------------------------------------------
 # Network Configuration
 # -----------------------------------------------------------------------------------------------
-GROUND_STATION_IP = "10.5.0.1"
-VIDEO_STREAM_PORT = 5602
-DATA_PORT = 5601
-COMMAND_PORT = 5603
 
+# TODO Creating Logging for crucial methods 
+
+# FIXME
+# Original hard-coded network constants (kept commented so they can be
+# restored easily if needed):
+
+# GROUND_STATION_IP = "10.5.0.1"
+# VIDEO_STREAM_PORT = 5602
+# DATA_PORT = 5601
+# COMMAND_PORT = 5603
+
+# Load configuration from `config.toml` if available. Uses stdlib tomllib
+# on Python 3.11+ or the `tomli` package on older Pythons.
+def load_config(path=None):
+    path = path or os.environ.get("DRONE_CONFIG", "config.toml")
+    if not os.path.exists(path):
+        return {}
+    try:
+        import tomllib as _toml
+        with open(path, "rb") as f:
+            return _toml.load(f)
+    except Exception:
+        try:
+            import tomllib as _toml
+            with open(path, "rb") as f:
+                return _toml.load(f)
+        except Exception:
+            return {}
+
+
+# Read config and apply defaults
+_CFG = load_config()
+_NET = _CFG.get("network", {})
+GROUND_STATION_IP = _NET.get("ground_ip", "10.5.0.1")
+VIDEO_STREAM_PORT = int(_NET.get("video_port", 5602))
+DATA_PORT = int(_NET.get("data_port", 5601))
+COMMAND_PORT = int(_NET.get("command_port", 5603))
+
+# -----------------------------------------------------------------------------------------------
+# Telemetry Sender
+# -----------------------------------------------------------------------------------------------
+
+"""
+    Function needs to reac to signal strength. Change packet size based on this.
+    Could help more reliability over UDP + distance
+    
+    Number of failed sends, then switch to low bandwidth mode and recuce packet size.
+
+    Need failsafe for disconnection.
+    Hover in place when disconnected, then return home after 30-60 sec timeout.
+
+    Make function to calc travel time back home based on battery.
+    Need to understand battery drain and total capacity based on factors. 
+    Calculate that into remaining flight time so we can avoid losing the drone."""
+
+PACKET_MAX_BYTES  = 1400 
+PACKET_HEADER_FMT = "!IHH"   #seq (I = uint32), frag_id (H = uint16), frag_count (H = uint16)
+PACKET_HEADER_LEN = struct.calcsize(PACKET_HEADER_FMT)   # 8 bytes
+PACKET_MAX_PAYLOAD = PACKET_MAX_BYTES - PACKET_HEADER_LEN
+
+def send_telemetry_udp(sock, addr, seq, data_bytes):
+
+    #Need to add fragment cap and catch excess frags. Maybe 4 bytes of fragments?
+    """
+    Packets must be smaller than 1446 bytes to avoid fragmentation.
+    8 byte header + 1392 byte payload = 1400 byte total per UDP datagram.
+    Header = seq (uint32) + frag_id (uint16) + frag_count (uint16)
+    The receiver uses seq to discard stale messages and frag_id/frag_count to reassemble fragments before deserialising.
+    """
+
+    def _pack_fragments(seq, payload_bytes): 
+        if not isinstance(payload_bytes, (bytes, bytearray)): #checks payload object is bytes/bytearray
+            raise TypeError("data_bytes must be bytes or bytearray")
+        
+        total = len(payload_bytes)
+        if total == 0:
+            frag_count = 1 # empty fragment = datagram (packet)
+        else:
+            frag_count = int(math.ceil(total / PACKET_MAX_PAYLOAD)) # from bytes divided by payload max
+
+        for frag_id in range(frag_count):
+            start = frag_id * PACKET_MAX_PAYLOAD # Index of payload start in array
+            payload = payload_bytes[start:start + PACKET_MAX_PAYLOAD] # Slice from array = payload content
+            header = struct.pack(PACKET_HEADER_FMT, seq & 0xFFFFFFFF, frag_id, frag_count) 
+            yield header + payload
+
+    # Send each fragment and handle errors per-fragment. Return True only if all fragments were sent.
+    
+    try:
+        for frag_id, packet in enumerate(_pack_fragments(seq, data_bytes)):
+            try:
+                sock.sendto(packet, addr)
+            except socket.error as e:
+                print(f"send_telemetry_udp: sendto failed for frag {frag_id}: {e}", end='\r')
+                return False
+    except Exception as e:
+        print(f"send_telemetry_udp: error preparing fragments: {e}")
+        return False
+
+    return True
 
 # -----------------------------------------------------------------------------------------------
 # Drone Command Controller
 # -----------------------------------------------------------------------------------------------
-class DroneCommandController:
+#Make sure logic is same or better than previous implement
+class DroneCommandController: # FIXME: rename to something like TargetTracker or DroneController since it also handles target tracking logic, not just command generation
     """Generates velocity commands based on target position in frame"""
 
 
-    def __init__(self):
+    # Control gains and parameters (tuned for stable tracking behavior)
+    def __init__(self): 
+        # Command gains in m/s, per call
         self.YAW_GAIN = -0.001
         self.UP_DOWN_GAIN = -0.001
         self.FORWARD_GAIN = 0.00001
-
-
+        # Bounding box target ratio, use this to follow target 
         self.TARGET_BBOX_AREA_RATIO = 0.05
         self.VERTICAL_SETPOINT_RATIO = 0.8
-
-
+        # Maximum command limits
         self.MAX_YAW_RATE = 10.0
         self.MAX_VERTICAL_VEL = 1.0
         self.MAX_FORWARD_VEL = 2.0
 
-
+    # Given a bounding box and frame dimensions, compute velocity commands
     def compute_command(self, bbox, frame_width, frame_height):
         if bbox is None or frame_width == 0 or frame_height == 0:
-            return 0.0, 0.0, 0.0, "COMMAND: HOVER (No Target)"
-
+            return 0.0, 0.0, 0.0, "COMMAND: HOVER (No Target Detected)"
 
         frame_center_x = frame_width / 2
+        # For road visibility
         frame_setpoint_y = frame_height * self.VERTICAL_SETPOINT_RATIO
 
+        #Bounding box center and area
+        (start_x, start_y, end_x, end_y) = bbox
+        dx = end_x - start_x
+        dy = end_y - start_y
+        bbox_area = dx * dy
+        bbox_center_x = start_x + (dx * 0.5)
+        bbox_center_y = start_y + (dy * 0.5)
 
+        """  - Previous computation
         (start_x, start_y, end_x, end_y) = bbox
         bbox_center_x = (start_x + end_x) / 2
         bbox_center_y = (start_y + end_y) / 2
-        bbox_area = (end_x - start_x) * (end_y - start_y)
-
+        bbox_area = (end_x - start_x) * (end_y - start_y)"""
 
         target_area = (frame_width * frame_height) * self.TARGET_BBOX_AREA_RATIO
 
-
+        # errors to center the camera on the target and maintain distance based on bbox area
         error_x = bbox_center_x - frame_center_x
         error_y = bbox_center_y - frame_setpoint_y
         error_area = target_area - bbox_area
+        # Proportional control for yaw, vertical, and forward velocities
+        # np.clip limits (K * error, min, max)
 
-
+        #FIND WAY TO CHANGE TO MIN/MAX less overhead
         yaw_velocity = np.clip(self.YAW_GAIN * error_x, -self.MAX_YAW_RATE, self.MAX_YAW_RATE)
         up_velocity = np.clip(self.UP_DOWN_GAIN * error_y, -self.MAX_VERTICAL_VEL, self.MAX_VERTICAL_VEL)
         forward_velocity = np.clip(self.FORWARD_GAIN * error_area, -self.MAX_FORWARD_VEL, self.MAX_FORWARD_VEL)
+        # should change names of up and forward to vertical and horizontal for clarity
 
 
-        command_str = (
+        # TODO Change to log & send data back to ground station
+        command_str = ( #FIXME MASSIVE OVERHEAD WHEN DRONE IS TRACKING
             f"TRACK: FWD={forward_velocity:.2f}m/s | "
             f"UP={up_velocity:.2f}m/s | YAW={yaw_velocity:.2f}°/s"
-        )
-
+        ) 
 
         return forward_velocity, up_velocity, yaw_velocity, command_str
-
-
-
 
 # -----------------------------------------------------------------------------------------------
 # Centroid Tracker
 # -----------------------------------------------------------------------------------------------
-class CentroidTracker:
+class CentroidTracker:   #FIXME There are flaws creating new IDs when objects disappear and reappear. Make sure logic is better or same as previous implement.
     def __init__(self, max_disappeared=30):
         self.tracked_objects = OrderedDict()
         self.disappeared_frames = OrderedDict()
@@ -178,61 +300,63 @@ class CentroidTracker:
         del self.tracked_objects[object_id]
         del self.disappeared_frames[object_id]
 
-
-
-
 # -----------------------------------------------------------------------------------------------
-# Application State
+# Application State 
 # -----------------------------------------------------------------------------------------------
 class AppState:
     def __init__(self):
-        self.tracker = CentroidTracker(max_disappeared=10)
+
+        self.tracker = CentroidTracker(max_disappeared=10) #what is a centroid? 
         self.target_id = None
         self.gst_error_event = threading.Event()
+
+        #Stop even threads
         self.command_thread_stop_event = threading.Event()
         self.control_loop_stop_event = threading.Event()
         self.data_sender_stop_event = threading.Event()
-
-
+        self.mavsdk_stop_event = threading.Event()
+        self.drone_state = "MANUAL" # Mavsdk state
+        
+        # Initial frame dimensions to be updated by Gstreamer thread
         self.frame_width = 0
         self.frame_height = 0
 
-
+        # Thread locks for sync access to shared states
         self.target_lock = threading.Lock()
         self.tracker_lock = threading.Lock()
         self.frame_size_lock = threading.Lock()
 
-
-        self.data_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
-
-
-
+        # TODO: New test thread locks for debuffing
+        self.drone_state_lock = threading.Lock()
+        
+        # UDP socket & sequence initialization
+        self.data_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) # no SO_SNDBUF increase needed due to fragmentation at send_telemetry_udp level
+        self.seq = 0
 
 # -----------------------------------------------------------------------------------------------
 # GStreamer Thread
 # -----------------------------------------------------------------------------------------------
+
 def run_gstreamer(app_state, main_loop, pipeline_str):
-    pipeline = None
+    pipeline = None #default pipeline state to allow for graceful error handling
     try:
         pipeline = Gst.parse_launch(pipeline_str)
 
-
-        appsink = pipeline.get_by_name("appsink")
+        appsink = pipeline.get_by_name("appsink") #parse appsink from pipeline
         if not appsink:
             print("ERROR: Could not find 'appsink' element in pipeline.")
             raise RuntimeError("Missing appsink element")
 
-
-        appsink.set_property('emit-signals', True)
-        appsink.connect('new-sample', on_new_hailo_sample, app_state)
-
+        appsink.set_property('emit-signals', True) #Enable signal emmisions for new samples
+        appsink.set_property('max-buffers', 2)     #Small frame buffer to prevent latency build-up (set to 1 on ground)
+        appsink.set_property('drop', True)         #Drop old frames to smoooth feed
+        appsink.set_property('async', False)       #Make pull-sample blocking to sync with processing
+        appsink.connect('new-sample', on_new_hailo_sample, app_state) # run new hailo sample
 
         pipeline.set_state(Gst.State.PLAYING)
         print("GStreamer pipeline is running...")
 
-
         main_loop.run()
-
 
     except GLib.Error as e:
         print(f"GStreamer GLib.Error: {e}")
@@ -245,130 +369,149 @@ def run_gstreamer(app_state, main_loop, pipeline_str):
         app_state.gst_error_event.set()
 
 
-def on_new_hailo_sample(appsink, app_state):
+def on_new_hailo_sample(appsink, app_state): 
     sample = appsink.emit('pull-sample')
     if not sample:
         return Gst.FlowReturn.OK
 
-
-    buffer = sample.get_buffer()
+    buffer = sample.get_buffer() #this is a frame
     if not buffer:
         return Gst.FlowReturn.OK
+    
+    #FIXME 
 
-
+    #extract data from frame
     caps = sample.get_caps()
-    structure = caps.get_structure(0)
+    structure = caps.get_structure(0)  #FIXME USELESS when we remove the two gets
+    width, height = 640, 640
+
+    """
     width = structure.get_value('width')
-    height = structure.get_value('height')
+    height = structure.get_value('height')"""
 
-
-    with app_state.frame_size_lock:
+    #auto detect frame size change (will not happen, just in case so no crash)
+    with app_state.frame_size_lock: 
         if app_state.frame_width != width or app_state.frame_height != height:
             app_state.frame_width = width
             app_state.frame_height = height
             print(f"Detected frame size: {width}x{height}")
 
 
-    current_detections_info = []
-    try:
-        roi = hailo.get_roi_from_buffer(buffer)
+    current_detections_info = [] 
+    try: #Get interest region and parse the region with the AI inference
+        roi = hailo.get_roi_from_buffer(buffer) 
         detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
 
-
-        object_labels = ["car", "truck", "bus", "motorbike", "person"]
-        MIN_CONFIDENCE = 0.3
-        MIN_BBOX_AREA = 1000
         
+        object_labels = ["car", "truck", "bus", "motorcycle", "person"] #was motobike
+        MIN_CONFIDENCE = 0.3 # Lower = more detections (tune based on testing)
+        MIN_BBOX_AREA = 32*32 # ~32*32 pixels out of 640*640, was 1000
+        
+        # keeps detection if label and confidence meets criteria
         filtered_detections = [det for det in detections if det.get_label() in object_labels and det.get_confidence() >= MIN_CONFIDENCE]
 
-
-        # for det in filtered_detections:
-        #     bbox_raw = det.get_bbox()
-        #     xmin = int(bbox_raw.xmin() * width)
-        #     ymin = int(bbox_raw.ymin() * height)
-        #     xmax = int(bbox_raw.xmax() * width)
-        #     ymax = int(bbox_raw.ymax() * height)
-
-
-        #     current_detections_info.append({
-        #         'bbox': (xmin, ymin, xmax, ymax),
-        #         'centroid': (int((xmin + xmax) / 2.0), int((ymin + ymax) / 2.0)),
-        #         'label': det.get_label()
-        #     })
-
-
-        # AI inference resolution
-        ai_w, ai_h = 640, 640
-        # Network video resolution
-        net_w, net_h = 1280, 720
+        #FIXME move to config file so we can tune settings easier
+        # also incorporate confidence score 
+        
+        ai_w, ai_h = 640, 640 # AI inference resolution
+        net_w, net_h = 1280, 720 # Network video resolution
+        scale_x = net_w / ai_w
+        scale_y = net_h / ai_h
 
 
         for det in filtered_detections:
             bbox_raw = det.get_bbox()
 
-
             # Convert normalized coordinates to AI frame coordinates
-            xmin = bbox_raw.xmin() * ai_w
-            ymin = bbox_raw.ymin() * ai_h
-            xmax = bbox_raw.xmax() * ai_w
-            ymax = bbox_raw.ymax() * ai_h
-
-
-            # Scale to match outgoing 1280x720 stream
-            scale_x = net_w / ai_w
-            scale_y = net_h / ai_h
-
-
-            xmin = int(xmin * scale_x)
-            ymin = int(ymin * scale_y)
-            xmax = int(xmax * scale_x)
-            ymax = int(ymax * scale_y)
+            xmin_ai = int(bbox_raw.xmin() * ai_w)
+            ymin_ai = int(bbox_raw.ymin() * ai_h)
+            xmax_ai = int(bbox_raw.xmax() * ai_w)
+            ymax_ai = int(bbox_raw.ymax() * ai_h)
+            
+            # Normalized cords for Network stream
+            xmin = int(xmin_ai * scale_x)
+            ymin = int(ymin_ai * scale_y)
+            xmax = int(xmax_ai * scale_x)
+            ymax = int(ymax_ai * scale_y)
 
             if (xmax - xmin) * (ymax - ymin) < MIN_BBOX_AREA:
                 continue
 
-
             current_detections_info.append({
                 'bbox': (xmin, ymin, xmax, ymax),
-                'centroid': (int((xmin + xmax) / 2.0), int((ymin + ymax) / 2.0)),
-                'label': det.get_label(),
+                'centroid': ((xmin + xmax) / 2, (ymin + ymax) / 2), # TODO Cast to int later to save processing time, we can afford floats for centroid calculations
+                'label': det.get_label(), #comes from object_labels list
                 'confidence': det.get_confidence()
-                })
-
+            })
 
     except Exception as e:
         print(f"Error processing Hailo detections: {e}")
 
-
+    # Gathering data to serialize and send to ground station
     with app_state.tracker_lock:
-        tracked_objects = app_state.tracker.update(current_detections_info, width)
-        tracked_objects_copy = copy.deepcopy(tracked_objects)
-
+        tracked_objects = app_state.tracker.update(current_detections_info, width) #not AppState?
+        snapshot = tracked_objects.copy()  # cheap shallow snapshot of mapping
 
     try:
         with app_state.target_lock:
             current_target_id = app_state.target_id
 
+        # Sending to serializer
+        # Ensure all values are native Python types (no numpy types) so msgpack
+        # serialization is robust on the receiver side. Explicitly coerce fields.
+        data_to_send = []
+        for oid, data in snapshot.items():
+            # Cache locals to reduce repeated lookups
+            bbox = data.get('bbox')
+            centroid = data.get('centroid')
+            label = data.get('label')
+            confidence = data.get('confidence')
 
-        data_to_send = [
-            {'id': oid, **data, 'is_target': (oid == current_target_id)}
-            for oid, data in tracked_objects_copy.items()
-        ]
+            item = {
+                'id': int(oid),
+                'bbox': (int(bbox[0]), int(bbox[1]), int(bbox[2]), int(bbox[3])) if bbox is not None else None,
+                'centroid': (int(centroid[0]), int(centroid[1])) if centroid is not None else None,
+                'label': str(label) if label is not None else None,
+                'confidence': float(confidence) if confidence is not None else None,
+                'is_target': bool(oid == current_target_id),
+            }
 
+            # Merge any other small, safe fields that are already serializable
+            for k, v in data.items():
+                if k in ('bbox', 'centroid', 'label', 'confidence'):
+                    continue
+                try:
+                    if isinstance(v, (int, float, str, bool, list, dict, type(None))):
+                        item[k] = v
+                except Exception:
+                    pass
 
-        pickled_data = pickle.dumps(data_to_send)
-        app_state.data_socket.sendto(pickled_data, (GROUND_STATION_IP, DATA_PORT))
+            data_to_send.append(item)
 
+# -----------------------------------------------------------------------------------------------
+# Serialization of Metadata
+# -----------------------------------------------------------------------------------------------
+# Add more telemetry data as needed, such as frame timestamp, processing latency, etc.
+
+        app_state.seq += 1
+        # Build the telemetry envelope
+        wrapper = {
+            'seq':       app_state.seq,
+            'timestamp': time.time(),
+            'objects':   data_to_send,
+        }
+
+        # Serialise and send (auto-fragmented to stay within MTU)
+        msgpack_data = msgpack.packb(wrapper, use_bin_type=True)
+        send_telemetry_udp(app_state.data_socket, (GROUND_STATION_IP, DATA_PORT),
+                           app_state.seq, msgpack_data)
 
     except socket.error as e:
         print(f"Network send error: {e}", end='\r')
     except Exception as e:
         print(f"Error sending tracking data: {e}")
 
-
     return Gst.FlowReturn.OK
-
-
 
 
 # -----------------------------------------------------------------------------------------------
@@ -405,87 +548,154 @@ def run_command_server(app_state):
                 if not app_state.command_thread_stop_event.is_set():
                     print(f"Command server error: {e}")
 
-
 # -----------------------------------------------------------------------------------------------
 # Drone Control Loop (MAVLink) Thread
 # -----------------------------------------------------------------------------------------------
+
 def run_drone_control(app_state, drone_controller):
     print("Drone control loop running (TEST MODE).")
 
-
+# Implement safety feature if commands stop, such as hovering or returning home after time out.
     while not app_state.control_loop_stop_event.is_set():
         try:
             with app_state.frame_size_lock:
                 frame_w = app_state.frame_width
                 frame_h = app_state.frame_height
 
-
             target_bbox = None
             with app_state.target_lock:
                 target_id = app_state.target_id
-
 
             if target_id is not None:
                 with app_state.tracker_lock:
                     target_data = app_state.tracker.tracked_objects.get(target_id)
                     if target_data:
                         target_bbox = target_data['bbox']
+    # scope issues with variables
+    # modify target_bbox to accept None
 
 
-            forward_vel, up_vel, yaw_rate, command_string = drone_controller.compute_command(
+    # FIXME: unused arguments, outside of scope?
+            forward_velocity, up_velocity, yaw_velocity, command_str = drone_controller.compute_command(
                 target_bbox, frame_w, frame_h
             )
+            # Mofify to print when the abs changes by 0.5 or so
+            print(f"{command_str}", end='\r') #might be heavy, since it prints every single command.
+            # modfify to log or print in interval.
 
-
-            print(f"  {command_string}        ", end='\r')
-
-
-            time.sleep(0.1)
-
+            time.sleep(0.1) #this is currently at 10hz which does not account for process
 
         except Exception as e:
             if not app_state.control_loop_stop_event.is_set():
                 print(f"Drone control loop error: {e}")
-                time.sleep(1)
+                time.sleep(1) 
 
 
+
+async def run_drone_control_async(app_state, drone_controller):
+
+    """
+    Asynchronous function to control the drone using MAVSDK.
+    
+    Parameters:
+        app_state: Shared application state containing locks and drone state variables.
+        drone_controller: Controller object to compute drone commands based on target tracking.
+    """
+        
+    drone = System()   #used SERIAL_PORT before, now 
+    print(f"Connecting to drone on {COMMAND_PORT}...")
+
+    try:
+        await drone.connect(system_address=COMMAND_PORT)
+
+        async for state in drone.core.connection_state():
+            if state.is_connected:
+                print("Drone connected!")
+                break
+
+        print("Waiting for drone to be ready...")
+        async for health in drone.telemetry.health():
+            if health.is_global_position_ok and health.is_home_position_ok:
+                print("Drone is ready.")
+                break
+
+        print("Starting in MANUAL mode. Click a target to engage autonomous tracking.")
+
+        #hover_lost_time = None
+        #hold_start_time = None
+
+        last_command_str = None
+
+        while not app_state.mavsdk_stop_event.is_set():
+            try:
+                with app_state.drone_state_lock:
+                    current_state = app_state.drone_state
+
+                with app_state.target_lock:
+                    target_id = app_state.target_id
+
+                with app_state.frame_size_lock:
+                    frame_w = app_state.frame_width
+                    frame_h = app_state.frame_height
+
+                target_bbox = None
+                if target_id is not None:
+                    with app_state.tracker_lock:
+                        target_data = app_state.tracker.tracked_objects.get(target_id)
+                        if target_data:
+                            target_bbox = target_data['bbox']
+
+                forward_velocity, up_velocity, yaw_velocity, command_str = drone_controller.compute_command(
+                    target_bbox, frame_w, frame_h
+                )
+                if command_str != last_command_str:
+                    print(f"{command_str}", end='\r')
+                    last_command_str = command_str
+
+            except Exception as e:
+                if not app_state.mavsdk_stop_event.is_set():
+                    print(f"Error in control loop: {e}")
+                    await asyncio.sleep(0.1)
+
+    except Exception as e:
+        print(f"Drone connection/setup error: {e}")
+
+    finally:
+        try:
+            await drone.disconnect()
+        except Exception as disconnect_error:
+            print(f"Error during drone disconnect: {disconnect_error}")
+            # target_bbox = None            
 
 
 # -----------------------------------------------------------------------------------------------
 # Main Function
 # -----------------------------------------------------------------------------------------------
 def main():
+
     Gst.init(None)
     main_loop = GLib.MainLoop()
 
-
     print("Initializing drone object tracker...")
-
 
     app_state = AppState()
     drone_controller = DroneCommandController()
 
-
     # --- Post-process library location ---
     postprocess_so = "/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes/libyolo_hailortpp_post.so"
-
 
     if not Path(postprocess_so).exists():
         print(f"ERROR: Post-process library not found at {postprocess_so}")
         print("Please check your Hailo TAPPAS installation")
         sys.exit(1)
 
-
     print(f"Using post-process library: {postprocess_so}")
-
 
     # --- Find model ---
     script_dir = Path(__file__).resolve().parent  # Define script directory
 
-
     def find_best_model():
         """Find the best available COCO detection model for this device"""
-
 
         # Detect Hailo architecture
         import subprocess
@@ -498,7 +708,6 @@ def main():
             print(f"Detected device: {arch_name}")
         except Exception as e:
             print(f"Could not detect architecture, assuming Hailo-8L: {e}")
-
 
         # Choose appropriate models for architecture
         if is_hailo8l:
@@ -519,13 +728,11 @@ def main():
                 "yolov8s.hef",
             ]
 
-
         search_paths = [
             Path.home() / "hailo-rpi5-examples/resources",
             Path("/usr/share/hailo-models"),
             script_dir,
         ]
-
 
         for path in search_paths:
             for model_name in model_priority:
@@ -534,14 +741,11 @@ def main():
                     print(f"Found model: {model_path}")
                     return model_path
 
-
         print("ERROR: No compatible model found!")
         print("Run: cd ~/hailo-rpi5-examples && ./download_resources.sh --all")
         sys.exit(1)
 
-
     model_path = find_best_model()
-
 
     # --- FIXED PIPELINE based on official Hailo examples ---
     # Key changes:
@@ -562,10 +766,8 @@ def main():
         "libcamerasrc ! "
         "video/x-raw,width=1920,height=1080,framerate=30/1,format=NV12 ! "
 
-
         # Split into two paths
         "tee name=t allow-not-linked=true "  # CRITICAL: allow-not-linked prevents blocking
-
 
         # --- Path 1: AI Processing ---
         "t. ! " +
@@ -579,9 +781,8 @@ def main():
         # Note: hailofilter thresholds will be applied in Python filtering below
         f"hailofilter so-path={postprocess_so} qos=false ! " +
         QUEUE("queue_appsink", max_size_buffers=2, leaky="downstream") +
-        "appsink name=appsink emit-signals=true sync=false max-buffers=2 drop=true async=false "  # async=false prevents blocking
-
-
+        "appsink name=appsink sync=false max-buffers=2 drop=true async=false "  # async=false prevents blocking
+        # removed redundant emit-signals=true
         # --- Path 2: Network Stream ---
         "t. ! " +
         QUEUE("queue_network", max_size_buffers=5, leaky="downstream") +
@@ -594,22 +795,16 @@ def main():
         f"udpsink host={GROUND_STATION_IP} port={VIDEO_STREAM_PORT} sync=false async=false"
     )
 
-
     print(f"\nUsing pipeline:\n{pipeline_str}\n")
 
-
     # --- Start All Threads ---
-    gst_thread = threading.Thread(target=run_gstreamer, args=(app_state, main_loop, pipeline_str), daemon=True)
-    gst_thread.start()
-
-
-    command_thread = threading.Thread(target=run_command_server, args=(app_state,), daemon=True)
-    command_thread.start()
-
-
-    control_thread = threading.Thread(target=run_drone_control, args=(app_state, drone_controller), daemon=True)
-    control_thread.start()
-
+    threads = [
+        threading.Thread(name="gstreamer",    target=run_gstreamer,      args=(app_state, main_loop, pipeline_str), daemon=True),
+        threading.Thread(name="command",      target=run_command_server, args=(app_state,),                         daemon=True),
+        threading.Thread(name="drone_control",target=run_drone_control,  args=(app_state, drone_controller),        daemon=True),
+    ]
+    for t in threads:
+        t.start()
 
     try:
         while True:
@@ -618,42 +813,41 @@ def main():
                 break
             time.sleep(1)
 
-
     except KeyboardInterrupt:
         print("\nShutdown requested by user (Ctrl+C)...")
 
-
+    # We might want to impliment a safe gaurd against shutting the scripts down while the drone is in flight.
+    # For example, we could require a double Ctrl+C within 5 seconds to confirm shutdown, or check if the drone is currently tracking a target before allowing shutdown.
+    # Or inputting a command from the ground station to allow shutdown. For now, we will just allow immediate shutdown on Ctrl+C, but this is an important safety consideration for real-world use.
     finally:
         print("Shutting down...")
-
 
         app_state.gst_error_event.set()
         app_state.command_thread_stop_event.set()
         app_state.control_loop_stop_event.set()
         app_state.data_sender_stop_event.set()
 
-
         if main_loop.is_running():
             print("Quitting GLib main loop...")
             main_loop.quit()
 
-
+        # TTL for thread joining to prevent hanging indefinitely
         print("Waiting for threads to join...")
+        for t in threads:
+            t.join(timeout=3)
+
+        """        
         gst_thread.join(timeout=3)
         command_thread.join(timeout=2)
         control_thread.join(timeout=2)
+        """
 
-
+        # Close the UDP socket
         app_state.data_socket.close()
 
-
+        # Final cleanup if necessary
         print("Drone tracker stopped")
         sys.exit(0)
 
-
-
-
 if __name__ == "__main__":
     main()
-
-
