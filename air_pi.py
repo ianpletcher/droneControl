@@ -17,7 +17,7 @@ import struct
 import math
 import time
 import copy 
-import tomllib
+import tomllib #or tomli?
 from mavsdk import System
 from pathlib import Path
 
@@ -61,7 +61,7 @@ def load_config(path=None):
             return _toml.load(f)
     except Exception:
         try:
-            import tomli as _toml
+            import tomllib as _toml
             with open(path, "rb") as f:
                 return _toml.load(f)
         except Exception:
@@ -326,10 +326,6 @@ class AppState:
         self.tracker_lock = threading.Lock()
         self.frame_size_lock = threading.Lock()
 
-        # FIXME Not in scope, does not actually hold info, just to prevent crashes until we refactor the tracker update to be fully within the GStreamer thread and properly locked.
-        tracked_objects = app_state.tracker.update(current_detections_info, width)
-        snapshot = tracked_objects.copy()  # Create a cheap shallow snapshot of the mapping.
-
         # TODO: New test thread locks for debuffing
         self.drone_state_lock = threading.Lock()
         
@@ -453,7 +449,7 @@ def on_new_hailo_sample(appsink, app_state):
 
     # Gathering data to serialize and send to ground station
     with app_state.tracker_lock:
-        tracked_objects = app_state.tracker.update(current_detections_info, width)
+        tracked_objects = app_state.tracker.update(current_detections_info, width) #not AppState?
         snapshot = tracked_objects.copy()  # cheap shallow snapshot of mapping
 
     try:
@@ -606,11 +602,11 @@ async def run_drone_control_async(app_state, drone_controller):
         drone_controller: Controller object to compute drone commands based on target tracking.
     """
         
-    drone = System()
-    print(f"Connecting to drone on {SERIAL_PORT}...")
+    drone = System()   #used SERIAL_PORT before, now 
+    print(f"Connecting to drone on {COMMAND_PORT}...")
 
     try:
-        await drone.connect(system_address=SERIAL_PORT)
+        await drone.connect(system_address=COMMAND_PORT)
 
         async for state in drone.core.connection_state():
             if state.is_connected:
