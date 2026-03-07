@@ -20,19 +20,9 @@ import copy
 import tomllib #or tomli?
 from mavsdk import System
 from pathlib import Path
+from pymavlink import mavutil
 
-"""Optimizations needed:
-    Reduce dictionary lookups and deep copies, deep copy has been removed.
-    Cache values and references to avoid repeated lookups (e.g. app_state.tracker.tracked_objects)
-    Sanitize values earlier to avoid overhead in critical loops
-    Reduce print/logging overhead (only log on significant changes or intervals)
-    Batch telemetry data to allow more bandwith to camer stream
-    Reuse buffers
-    Move more worth to Numpy for faster processing (currently most is in Python loops)
-    Profile to find bottlenecks and optimize those (e.g. using Cython or Numba for critical sections if needed)
-    - time.perf_counter()
 
-"""
 
 # -----------------------------------------------------------------------------------------------
 # Network Configuration
@@ -382,15 +372,11 @@ def on_new_hailo_sample(appsink, app_state):
 
     #extract data from frame
     caps = sample.get_caps()
-    structure = caps.get_structure(0)  #FIXME USELESS when we remove the two gets
-    width, height = 640, 640
-
-    """
+    structure = caps.get_structure(0)
     width = structure.get_value('width')
-    height = structure.get_value('height')"""
-
-    #auto detect frame size change (will not happen, just in case so no crash)
-    with app_state.frame_size_lock: 
+    height = structure.get_value('height')
+    # width, height = 640, 640
+    with app_state.frame_size_lock:
         if app_state.frame_width != width or app_state.frame_height != height:
             app_state.frame_width = width
             app_state.frame_height = height
@@ -439,8 +425,9 @@ def on_new_hailo_sample(appsink, app_state):
 
             current_detections_info.append({
                 'bbox': (xmin, ymin, xmax, ymax),
-                'centroid': ((xmin + xmax) / 2, (ymin + ymax) / 2), # TODO Cast to int later to save processing time, we can afford floats for centroid calculations
-                'label': det.get_label(), #comes from object_labels list
+                'centroid': (int((xmin + xmax) / 2.0), int((ymin + ymax) / 2.0)), # TODO Cast to int later to save processing time, we can afford floats for centroid calculations
+                'label': det.get_label() #comes from object_labels list
+
                 'confidence': det.get_confidence()
             })
 
