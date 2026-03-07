@@ -1,0 +1,63 @@
+# DroneControl configuration (TOML)
+
+[network]
+ground_ip = "10.5.0.1"
+air_ip = "10.5.0.2"
+video_port = 5000
+data_port = 5001
+command_port = 5002
+use_multicast = false
+multicast_group = "239.255.0.1"
+# Check what the code currently uses in this regard 
+# max_udp_payload = 1200
+packet_max_bytes = 1400
+packet_max_payload = packet_max_bytes - packet_header_len   # this is definitely wrong 
+
+
+[hailo]
+postprocess_so = "/usr/lib/aarch64-linux-gnu/hailo/tappas/post_processes/libyolo_hailortpp_post.so"
+# two seperate camera streams
+ai_resolution = [640, 640]
+net_resolution = [1280, 720]
+model_priority = ["/usr/share/hailo-models/yolov8s_h8l.hef", "/usr/share/hailo-models/yolov6n_h8l.hef"]
+
+[tracker]
+max_disappeared = 10
+min_confidence = 0.3
+min_bbox_area = 1000
+
+[controller]
+yaw_gain = -0.001
+up_down_gain = -0.001
+forward_gain = 0.00001
+target_bbox_area_ratio = 0.05
+vertical_setpoint_ratio = 0.8
+max_yaw_rate = 10.0
+max_vertical_vel = 1.0
+max_forward_vel = 2.0
+
+[gstreamer]
+camera_width = 1920
+camera_height = 1080
+camera_framerate = "30/1"
+network_bitrate = 1500
+key_int_max = 15
+rtpjitterbuffer_latency = 50
+# Find a way to check at runtime? Pi 5 has no HW encoder
+use_hw_encoder = false
+encoder_fallback = "x264"
+
+
+[format]
+tracking_protocol = "msgpack"
+tracking_freq_hz = 10
+include_seq_ts = true
+
+[telemetry]
+reassembly_timeout = 0.2
+
+[logging] #Security concern: spoofing IP's is still possible 
+level = "INFO"
+# health_probe_port = 8080              # integer port (this is a want, not a need)
+# auth.hmac_key = ""                    # string for key
+# allowed_command_ips = []              #array of ip's as string 
