@@ -142,7 +142,8 @@ def send_telemetry_udp(sock, addr, seq, data_bytes):
 # -----------------------------------------------------------------------------------------------
 # Drone Command Controller
 # -----------------------------------------------------------------------------------------------
-class DroneCommandController:
+#Make sure logic is same or better than previous implement
+class DroneCommandController: # FIXME: rename to something like TargetTracker or DroneController since it also handles target tracking logic, not just command generation
     """Generates velocity commands based on target position in frame"""
 
 
@@ -177,6 +178,12 @@ class DroneCommandController:
         bbox_center_x = start_x + (dx * 0.5)
         bbox_center_y = start_y + (dy * 0.5)
 
+        """  - Previous computation
+        (start_x, start_y, end_x, end_y) = bbox
+        bbox_center_x = (start_x + end_x) / 2
+        bbox_center_y = (start_y + end_y) / 2
+        bbox_area = (end_x - start_x) * (end_y - start_y)"""
+
         target_area = (frame_width * frame_height) * self.TARGET_BBOX_AREA_RATIO
 
         # errors to center the camera on the target and maintain distance based on bbox area
@@ -192,17 +199,19 @@ class DroneCommandController:
         forward_velocity = np.clip(self.FORWARD_GAIN * error_area, -self.MAX_FORWARD_VEL, self.MAX_FORWARD_VEL)
         # should change names of up and forward to vertical and horizontal for clarity
 
-        command_str = ( #INCREADLE OVERHEAD WHEN DRONE IS TRACKING
+
+        # TODO Change to log & send data back to ground station
+        command_str = ( #FIXME MASSIVE OVERHEAD WHEN DRONE IS TRACKING
             f"TRACK: FWD={forward_velocity:.2f}m/s | "
             f"UP={up_velocity:.2f}m/s | YAW={yaw_velocity:.2f}°/s"
-        ) # TODO Change to logging and send this data back to grround station to display
+        ) 
 
         return forward_velocity, up_velocity, yaw_velocity, command_str
 
 # -----------------------------------------------------------------------------------------------
 # Centroid Tracker
 # -----------------------------------------------------------------------------------------------
-class CentroidTracker:
+class CentroidTracker:   #FIXME There are flaws creating new IDs when objects disappear and reappear. Make sure logic is better or same as previous implement.
     def __init__(self, max_disappeared=30):
         self.tracked_objects = OrderedDict()
         self.disappeared_frames = OrderedDict()
@@ -321,7 +330,7 @@ class AppState:
         tracked_objects = app_state.tracker.update(current_detections_info, width)
         snapshot = tracked_objects.copy()  # Create a cheap shallow snapshot of the mapping.
 
-        #TODO: New test thread locks for debuffing
+        # TODO: New test thread locks for debuffing
         self.drone_state_lock = threading.Lock()
         
         # UDP socket & sequence initialization
@@ -377,7 +386,7 @@ def on_new_hailo_sample(appsink, app_state):
 
     #extract data from frame
     caps = sample.get_caps()
-    structure = caps.get_structure(0)  #USELESS when we remove the two gets
+    structure = caps.get_structure(0)  #FIXME USELESS when we remove the two gets
     width, height = 640, 640
 
     """
@@ -434,7 +443,7 @@ def on_new_hailo_sample(appsink, app_state):
 
             current_detections_info.append({
                 'bbox': (xmin, ymin, xmax, ymax),
-                'centroid': ((xmin + xmax) / 2, (ymin + ymax) / 2),
+                'centroid': ((xmin + xmax) / 2, (ymin + ymax) / 2), # TODO Cast to int later to save processing time, we can afford floats for centroid calculations
                 'label': det.get_label(), #comes from object_labels list
                 'confidence': det.get_confidence()
             })
