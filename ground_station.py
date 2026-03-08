@@ -33,7 +33,16 @@ Send Commands over TCP and Video over UDP.
 # We are listening on all interfaces (0.0.0.0).
 
 
-# RADXA_GADGET_IP = "10.5.0.2"      # IP of the Air Pi (for sending commands to)
+# Radxa Zero 3W USB Ethernet Gadget IP (usb0 interface, static 10.55.0.1)
+# The Radxa forwards all three streams transparently between the drone and this laptop.
+RADXA_GADGET_IP = "10.55.0.1"         # Radxa USB gadget IP (forwards commands to drone)
+VIDEO_STREAM_PORT = 5602         # Port to listen on for H.264 video (forwarded from drone)
+DATA_PORT = 5601                 # Port to listen on for tracking data (forwarded from drone)
+COMMAND_PORT = 5603              # Port to send commands to (Radxa forwards to drone)
+
+
+
+# RADXA_GADGET_IP = "10.5.0.1"      # IP of the Air Pi (for sending commands to)
 # VIDEO_STREAM_PORT = 5602    # Port to listen on for H.264 video
 # DATA_PORT = 5601            # Port to listen on for tracking data
 # COMMAND_PORT = 5603         # Port on the Air Pi to send commands to
@@ -59,10 +68,10 @@ def load_config(path=None):
 # Read config and apply defaults
 _CFG = load_config()
 _NET = _CFG.get("network", {})
-RADXA_GADGET_IP = _NET.get("air_ip", "10.5.0.2")
-VIDEO_STREAM_PORT = int(_NET.get("video_port", 5602))
-DATA_PORT = int(_NET.get("data_port", 5601))
-COMMAND_PORT = int(_NET.get("command_port", 5603))
+RADXA_GADGET_IP = _NET.get("air_ip", "10.5.0.1")
+VIDEO_STREAM_PORT = int(_NET.get("video_port", 5602)) # Port to listen on for H.264 video (forwarded from drone)
+DATA_PORT = int(_NET.get("data_port", 5601)) # Port to listen on for tracking data (forwarded from drone)
+COMMAND_PORT = int(_NET.get("command_port", 5603)) # Port to send commands to (Radxa forwards to drone)
 
 # Must match the constants in air_pi.py exactly.
 PACKET_HEADER_FMT = "!I H H"   # seq (uint32), frag_id (uint16), frag_count (uint16)
@@ -225,7 +234,7 @@ def on_new_video_sample(appsink, app_state):
 
 """
 def run_data_receiver(app_state):
-    #Listens for UDP packets containing pickled tracking data
+    # Listens for UDP packets containing pickled tracking data
     # Drone sends pickled list of dicts for tracking data
     with socket.socket(socket.AF_INET, socket.SOCK_DGRAM) as s:
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
@@ -418,7 +427,8 @@ def render_graphics(screen, frame, tracking_data, current_target_id, ui_state, f
     if frame is None:
         # Display "Waiting for video" message
         screen.fill((30, 30, 30)) # Dark grey background
-        text_surface = fonts['main'].render("Waiting for video stream...", True, (255, 255, 255))
+        wait_text = "Waiting for video stream... (Radxa USB connected?)"
+        text_surface = fonts['main'].render(wait_text, True, (255, 255, 255))
         text_rect = text_surface.get_rect(center=screen.get_rect().center)
         screen.blit(text_surface, text_rect)
         pygame.display.flip()
@@ -481,6 +491,11 @@ def main():
     main_loop = GLib.MainLoop()
    
     print("Initializing ground station...")
+    print("Initializing ground station...")
+    print(f"Expecting Radxa USB gadget at: {RADXA_GADGET_IP}")
+    print(f"Video  : UDP :{VIDEO_STREAM_PORT}")
+    print(f"Data   : UDP :{DATA_PORT}")
+    print(f"Command: TCP :{COMMAND_PORT}")
    
     app_state = AppState()
    
