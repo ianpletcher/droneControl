@@ -22,7 +22,42 @@ from mavsdk import System
 from pathlib import Path
 from pymavlink import mavutil
 
+"""
+When utilizing WFB-NG we need to make sure only specific data is being sent over the IPV4 link.
+Video stream and MAvlink has more overhead than UDP in this case.
+Only data we should reasonable send over is telementary and command data. 
+We can use UDP for telemetry and TCP for commands.
+There is an aggregation feature for Aggregation of mavlink and tunnel packets. Doesn't send wifi packet for every mavlink or tunnel packet.
 
+Maximum throughut of  30Mbit/s
+Aim for 6-7kbps bitrate on camera stream """
+
+
+""" 
+    New Features to add:
+
+- Dynamic Bandwidth adustment to optimize the bitrate of camera stream based on network conditions.
+- Implement features to calculate return to home time based on the battery level.
+- Create better logging for crucial methods for debugging and error handling.
+- Add disconnect and network issue fail safes, i.e. hover in place/return home.
+- Way later on create a desktop application or web based on to dsiplay all of this 
+- Implement better centroid object to track objects that escape view and reappear.
+- Create a command queue to handle command bursts and prevent overload on the drone.
+- Add a jitter reducer to smooth out the drone's movements and prevent over-correction when tracking
+- Possible utilize a thread pool to better manage threads in AppState.
+
+    Computational improvements: 
+
+- Optimize np.clip itilization, likely replace with manual to reduce overhead.
+- Handle fragmentation of packets better using a memoryview.
+- Create better pipeline error handling.
+- Parallelize some of the processing.
+- Cache the centroid tracking to help reduce redundancy.
+- Replace the blocking sockets with async sockets to prevent blocking and improve responsiveness.
+- Use more efficent data tructures in tracking implement.
+- Reduce printing overhead and transition to logging with log levels.
+- 
+"""
 
 # -----------------------------------------------------------------------------------------------
 # Network Configuration
@@ -56,6 +91,14 @@ def load_config(path=None):
                 return _toml.load(f)
         except Exception:
             return {}
+        
+"""
+def validate_config(config):
+    if config["network"]["packet_max_bytes"] <= 0:
+        raise ValueError("packet_max_bytes must be greater than 0")
+    if config["controller"]["yaw_gain"] >= 0:
+        raise ValueError("yaw_gain must be negative")
+"""
 
 
 # Read config and apply defaults
@@ -71,7 +114,7 @@ COMMAND_PORT = int(_NET.get("command_port", 5603))
 # -----------------------------------------------------------------------------------------------
 
 """
-    Function needs to reac to signal strength. Change packet size based on this.
+    Function needs to react to signal strength. Change packet size based on this.
     Could help more reliability over UDP + distance
     
     Number of failed sends, then switch to low bandwidth mode and recuce packet size.
@@ -90,13 +133,8 @@ PACKET_MAX_PAYLOAD = PACKET_MAX_BYTES - PACKET_HEADER_LEN
 
 def send_telemetry_udp(sock, addr, seq, data_bytes):
 
-    #Need to add fragment cap and catch excess frags. Maybe 4 bytes of fragments?
-    """
-    Packets must be smaller than 1446 bytes to avoid fragmentation.
-    8 byte header + 1392 byte payload = 1400 byte total per UDP datagram.
-    Header = seq (uint32) + frag_id (uint16) + frag_count (uint16)
-    The receiver uses seq to discard stale messages and frag_id/frag_count to reassemble fragments before deserialising.
-    """
+    # 8 byte header + 1392 byte payload = 1400 byte, under 1446
+    # TODO Need to add fragment cap and catch excess frags. Maybe 4 bytes of fragments?
 
     def _pack_fragments(seq, payload_bytes): 
         if not isinstance(payload_bytes, (bytes, bytearray)): #checks payload object is bytes/bytearray
@@ -132,10 +170,9 @@ def send_telemetry_udp(sock, addr, seq, data_bytes):
 # -----------------------------------------------------------------------------------------------
 # Drone Command Controller
 # -----------------------------------------------------------------------------------------------
-#Make sure logic is same or better than previous implement
+
 class DroneCommandController: # FIXME: rename to something like TargetTracker or DroneController since it also handles target tracking logic, not just command generation
     """Generates velocity commands based on target position in frame"""
-
 
     # Control gains and parameters (tuned for stable tracking behavior)
     def __init__(self): 
@@ -183,13 +220,13 @@ class DroneCommandController: # FIXME: rename to something like TargetTracker or
         # Proportional control for yaw, vertical, and forward velocities
         # np.clip limits (K * error, min, max)
 
-        #FIND WAY TO CHANGE TO MIN/MAX less overhead
+        # FIXME np.clip has more overhead than manual clipping, optimize later if needed. 
+        # deadzone would be a good idea to reduce jitter when target is near center. For example, if abs(error_x) < 20 pixels, set yaw_velocity to 0. Similar for vertical and forward with appropriate thresholds.
         yaw_velocity = np.clip(self.YAW_GAIN * error_x, -self.MAX_YAW_RATE, self.MAX_YAW_RATE)
         up_velocity = np.clip(self.UP_DOWN_GAIN * error_y, -self.MAX_VERTICAL_VEL, self.MAX_VERTICAL_VEL)
         forward_velocity = np.clip(self.FORWARD_GAIN * error_area, -self.MAX_FORWARD_VEL, self.MAX_FORWARD_VEL)
         # should change names of up and forward to vertical and horizontal for clarity
-
-
+ 
         # TODO Change to log & send data back to ground station
         command_str = ( #FIXME MASSIVE OVERHEAD WHEN DRONE IS TRACKING
             f"TRACK: FWD={forward_velocity:.2f}m/s | "
@@ -197,6 +234,52 @@ class DroneCommandController: # FIXME: rename to something like TargetTracker or
         ) 
 
         return forward_velocity, up_velocity, yaw_velocity, command_str
+
+# -----------------------------------------------------------------------------------------------
+# Tricking Smoother to Reduce Jitter (not implemented in main)z
+# -----------------------------------------------------------------------------------------------
+# Implements scaling and deadzone to reduze the movement when a target is relatively centered.
+# Helps with flight stability, also reduces the num of commands required, saving a lot of overhead.
+class JitterReducer:
+    def __init__(self, dead_zone_radius=10, smoothing_factor=0.8):
+        # Initialize the jitter reducer.
+        self.dead_zone_radius = dead_zone_radius
+        self.smoothing_factor = smoothing_factor
+        self.previous_position = None
+
+    def is_in_dead_zone(self, x, y, center_x, center_y):
+        # Check target is within dead zone.
+        distance = math.sqrt((x - center_x) ** 2 + (y - center_y) ** 2)
+        return distance < self.dead_zone_radius
+
+    def smooth_position(self, current_position):
+        # Smooth the position using an exponential moving average.
+
+        if self.previous_position is None:
+            self.previous_position = current_position
+            return current_position
+
+        smoothed_x = (
+            self.smoothing_factor * current_position[0]
+            + (1 - self.smoothing_factor) * self.previous_position[0]
+        )
+        smoothed_y = (
+            self.smoothing_factor * current_position[1]
+            + (1 - self.smoothing_factor) * self.previous_position[1]
+        )
+
+        self.previous_position = (smoothed_x, smoothed_y)
+        return smoothed_x, smoothed_y
+
+    def reduce_jitter(self, x, y, center_x, center_y):
+        # Reduce jitter for the given position.
+
+        if self.is_in_dead_zone(x, y, center_x, center_y):
+            # If in the dead zone, return the center position
+            return center_x, center_y
+        else:
+            # Smooth the position
+            return self.smooth_position((x, y))
 
 # -----------------------------------------------------------------------------------------------
 # Centroid Tracker
@@ -322,6 +405,13 @@ class AppState:
         # UDP socket & sequence initialization
         self.data_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM) # no SO_SNDBUF increase needed due to fragmentation at send_telemetry_udp level
         self.seq = 0
+
+        # velocity shared state & threads
+        self.forward_velocity = 0.0
+        self.up_velocity = 0.0
+        self.yaw_velocity = 0.0
+
+
 
 # -----------------------------------------------------------------------------------------------
 # GStreamer Thread
@@ -514,7 +604,7 @@ def run_command_server(app_state):
 
         while not app_state.command_thread_stop_event.is_set():
             try:
-                conn, addr = s.accept()
+                conn, addr = s.accept() # addr is not used since we only accept from one ground station, but could be used for logging or future features
                 with conn:
                     data = conn.recv(1024)
                     if data:
@@ -538,7 +628,7 @@ def run_command_server(app_state):
 # Drone Control Loop (MAVLink) Thread
 # -----------------------------------------------------------------------------------------------
 
-def run_drone_control(app_state, drone_controller):
+def run_drone_control(app_state, drone_controller, bbox):
     print("Drone control loop running (TEST MODE).")
 
 # Implement safety feature if commands stop, such as hovering or returning home after time out.
@@ -560,11 +650,16 @@ def run_drone_control(app_state, drone_controller):
     # scope issues with variables
     # modify target_bbox to accept None
 
-
-    # FIXME: unused arguments, outside of scope?
             forward_velocity, up_velocity, yaw_velocity, command_str = drone_controller.compute_command(
                 target_bbox, frame_w, frame_h
             )
+            with app_state.velocity_lock:
+                app_state.forward_velocity = forward_velocity
+                app_state.up_velocit = up_velocity
+                app_state.yaw_velocity = yaw_velocity
+            print(f"Control Loop: {command_str}")
+            time.sleep(0.1)
+
             # Mofify to print when the abs changes by 0.5 or so
             print(f"{command_str}", end='\r') #might be heavy, since it prints every single command.
             # modfify to log or print in interval.
@@ -578,15 +673,7 @@ def run_drone_control(app_state, drone_controller):
 
 
 
-async def run_drone_control_async(app_state, drone_controller):
-
-    """
-    Asynchronous function to control the drone using MAVSDK.
-    
-    Parameters:
-        app_state: Shared application state containing locks and drone state variables.
-        drone_controller: Controller object to compute drone commands based on target tracking.
-    """
+async def run_drone_control_async(app_state, drone_controller, bbox):
         
     drone = System()   #used SERIAL_PORT before, now 
     print(f"Connecting to drone on {COMMAND_PORT}...")
@@ -607,14 +694,14 @@ async def run_drone_control_async(app_state, drone_controller):
 
         print("Starting in MANUAL mode. Click a target to engage autonomous tracking.")
 
-        #hover_lost_time = None
+        #hover_lost_time = None 
         #hold_start_time = None
 
         last_command_str = None
 
         while not app_state.mavsdk_stop_event.is_set():
             try:
-                with app_state.drone_state_lock:
+                with app_state.drone_state_lock: # current state not implemented correctly
                     current_state = app_state.drone_state
 
                 with app_state.target_lock:
@@ -630,10 +717,16 @@ async def run_drone_control_async(app_state, drone_controller):
                         target_data = app_state.tracker.tracked_objects.get(target_id)
                         if target_data:
                             target_bbox = target_data['bbox']
-
+                # logic might not be correct on drone_controller implementation, need to make sure it can handle target_bbox being None and not send erratic commands.
                 forward_velocity, up_velocity, yaw_velocity, command_str = drone_controller.compute_command(
                     target_bbox, frame_w, frame_h
                 )
+                async with asyncio.Lock():
+                    app_state.forward_velocity = forward_velocity                        
+                    app_state.up_velocity = up_velocity
+                    app_state.yaw_velocity = yaw_velocity
+                print(f"Async Control Loop: {command_str}")
+                await asyncio.sleep(0.1)
                 if command_str != last_command_str:
                     print(f"{command_str}", end='\r')
                     last_command_str = command_str
