@@ -463,9 +463,8 @@ def on_new_hailo_sample(appsink, app_state):
     #extract data from frame
     caps = sample.get_caps()
     structure = caps.get_structure(0)
-    width = structure.get_value('width')
-    height = structure.get_value('height')
-    # width, height = 640, 640
+    
+    width, height = 640, 640
     with app_state.frame_size_lock:
         if app_state.frame_width != width or app_state.frame_height != height:
             app_state.frame_width = width
@@ -490,6 +489,7 @@ def on_new_hailo_sample(appsink, app_state):
         # also incorporate confidence score 
         
         ai_w, ai_h = 640, 640 # AI inference resolution
+        
         net_w, net_h = 1280, 720 # Network video resolution
         scale_x = net_w / ai_w
         scale_y = net_h / ai_h
@@ -875,7 +875,7 @@ def main():
     )
 
     print(f"\nUsing pipeline:\n{pipeline_str}\n")
-
+    
     # --- Start All Threads ---
     threads = [
         threading.Thread(name="gstreamer",    target=run_gstreamer,      args=(app_state, main_loop, pipeline_str), daemon=True),

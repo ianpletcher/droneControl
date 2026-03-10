@@ -5,7 +5,7 @@ from gi.repository import Gst, GObject, GLib
 import os
 import sys
 import pygame #rendering UI
-import numpy as np  # <-- ADDED THIS MISSING IMPORT
+import numpy as np
 import threading
 import socket
 import json
