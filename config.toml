@@ -8,10 +8,8 @@ data_port = 5001
 command_port = 5002
 use_multicast = false
 multicast_group = "239.255.0.1"
-# Check what the code currently uses in this regard 
-# max_udp_payload = 1200
+# Check what the code currently uses in this regard #
 packet_max_bytes = 1400
-packet_max_payload = packet_max_bytes - packet_header_len   # this is definitely wrong 
 
 
 [hailo]
@@ -44,8 +42,8 @@ network_bitrate = 1500
 key_int_max = 15
 rtpjitterbuffer_latency = 50
 # Find a way to check at runtime? Pi 5 has no HW encoder
-use_hw_encoder = false
-encoder_fallback = "x264"
+#use_hw_encoder = false
+#encoder_fallback = "x264"
 
 
 [format]
