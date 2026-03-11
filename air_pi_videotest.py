@@ -81,7 +81,7 @@ def run_state_machine(test_state):
 
             elif current_state == "TRACKING":
                 target_found = target_id is not None
-                print(f"STATE: TRACKING | Target = {target_id}"                             
+                print(f"STATE: TRACKING | Target = {target_id}")                             
 
                 if target_id is None:
                     print("\n[TRACKING] Target cleared by operator. Returning to MANUAL.")
