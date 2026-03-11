@@ -17,6 +17,20 @@ from pathlib import Path
 from pymavlink import mavutil
 
 # -----------------------------------------------------------------------------------------------
+# Detection Filtering Constants
+# -----------------------------------------------------------------------------------------------
+MIN_CONFIDENCE = 0.3
+MIN_BBOX_AREA = 1000
+
+# -----------------------------------------------------------------------------------------------
+# State Machine Constants
+# -----------------------------------------------------------------------------------------------
+TARGET_LOST_HOVER_TIMEOUT = 5.0
+HOLD_BEFORE_MANUAL_DURATION = 2.0
+STATE_CYCLE_INTERVAL = 0.1
+
+
+# -----------------------------------------------------------------------------------------------
 # Network Configuration
 # -----------------------------------------------------------------------------------------------
 GROUND_STATION_IP = "10.5.0.1"
@@ -192,6 +206,7 @@ class AppState:
         self.command_thread_stop_event = threading.Event()
         self.control_loop_stop_event = threading.Event()
         self.data_sender_stop_event = threading.Event()
+        self.drone_state = "MANUAL"
 
 
         self.frame_width = 0
@@ -201,6 +216,7 @@ class AppState:
         self.target_lock = threading.Lock()
         self.tracker_lock = threading.Lock()
         self.frame_size_lock = threading.Lock()
+        self.drone_state_lock = threading.Lock()
 
 
         self.data_socket = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
@@ -275,11 +291,12 @@ def on_new_hailo_sample(appsink, app_state):
 
 
         object_labels = ["car", "truck", "bus", "motorbike", "person"]
-        MIN_CONFIDENCE = 0.3
-        MIN_BBOX_AREA = 1000
         
-        filtered_detections = [det for det in detections if det.get_label() in object_labels and det.get_confidence() >= MIN_CONFIDENCE]
-
+        filtered_detections = [
+            det for det in detections
+            if det.get_label() in object_labels
+            and det.get_confidence() >= MIN_CONFIDENCE
+            ]
 
         # for det in filtered_detections:
         #     bbox_raw = det.get_bbox()
@@ -393,6 +410,17 @@ def run_command_server(app_state):
                             new_target_id = command['target_id']
                             with app_state.target_lock:
                                 app_state.target_id = new_target_id
+                            with app_state.drone_state_lock:
+                                if new_target_id is not None:
+                                    if app_state.drone_state == "MANUAL":
+                                        app_state.drone_state = "TRACKING"
+                                        print(f"\n[MANUAL] → TRACKING: Target ID {new_target_id} selected.")
+                                    else:
+                                        app_state.drone_state = "TRACKING"
+                                        print(f"\n[{app_state.drone_state}] → TRACKING: Target switched to ID {new_target_id}.")
+                                else:
+                                    app_state.drone_state = "MANUAL"
+                                    print("\nTarget cleared by operator. Returning to MANUAL.")
                             print(f"\nTarget set by ground station: ID {new_target_id}")
 
 
@@ -409,43 +437,91 @@ def run_command_server(app_state):
 # Drone Control Loop (MAVLink) Thread
 # -----------------------------------------------------------------------------------------------
 def run_drone_control(app_state, drone_controller):
-    print("Drone control loop running (TEST MODE).")
+    print("Drone control loop running (SIMULATED — no MAVSDK).")
 
+    hover_lost_time = None
+    hold_start_time = None
 
     while not app_state.control_loop_stop_event.is_set():
         try:
+            with app_state.drone_state_lock:
+                current_state = app_state.drone_state
+
             with app_state.frame_size_lock:
                 frame_w = app_state.frame_width
                 frame_h = app_state.frame_height
 
-
-            target_bbox = None
             with app_state.target_lock:
                 target_id = app_state.target_id
 
-
+            target_bbox = None
             if target_id is not None:
                 with app_state.tracker_lock:
                     target_data = app_state.tracker.tracked_objects.get(target_id)
                     if target_data:
                         target_bbox = target_data['bbox']
 
+            if current_state == "MANUAL":
+                print("STATE: MANUAL | Waiting for target selection...        ", end='\r')
 
-            forward_vel, up_vel, yaw_rate, command_string = drone_controller.compute_command(
-                target_bbox, frame_w, frame_h
-            )
+            elif current_state == "TRACKING":
+                if target_id is None:
+                    print("\n[TRACKING] Target cleared. Returning to MANUAL.")
+                    with app_state.drone_state_lock:
+                        app_state.drone_state = "MANUAL"
 
+                elif target_bbox is None:
+                    print("\n[TRACKING] Target lost. Transitioning to HOVERING.")
+                    hover_lost_time = time.time()
+                    with app_state.drone_state_lock:
+                        app_state.drone_state = "HOVERING"
 
-            print(f"  {command_string}        ", end='\r')
+                else:
+                    forward_vel, up_vel, yaw_rate, command_string = drone_controller.compute_command(
+                        target_bbox, frame_w, frame_h
+                    )
+                    print(f"  [TRACKING] {command_string}        ", end='\r')
 
+            elif current_state == "HOVERING":
+                elapsed = time.time() - hover_lost_time
+                remaining = TARGET_LOST_HOVER_TIMEOUT - elapsed
 
-            time.sleep(0.1)
+                if target_bbox is not None:
+                    print("\n[HOVERING] Target reacquired. Resuming TRACKING.")
+                    hover_lost_time = None
+                    with app_state.drone_state_lock:
+                        app_state.drone_state = "TRACKING"
 
+                elif elapsed >= TARGET_LOST_HOVER_TIMEOUT:
+                    print("\n[HOVERING] Timeout elapsed. Transitioning to RETURNING.")
+                    hold_start_time = time.time()
+                    with app_state.drone_state_lock:
+                        app_state.drone_state = "RETURNING"
+
+                else:
+                    print(f"  [HOVERING] Searching for target... ({remaining:.1f}s)        ", end='\r')
+
+            elif current_state == "RETURNING":
+                elapsed = time.time() - hold_start_time
+                remaining = HOLD_BEFORE_MANUAL_DURATION - elapsed
+
+                if elapsed >= HOLD_BEFORE_MANUAL_DURATION:
+                    print("\n[RETURNING] Hold complete. Returning to MANUAL.")
+                    with app_state.target_lock:
+                        app_state.target_id = None
+                    with app_state.drone_state_lock:
+                        app_state.drone_state = "MANUAL"
+                    hold_start_time = None
+                else:
+                    print(f"  [RETURNING] Holding position... ({remaining:.1f}s)        ", end='\r')
+
+            time.sleep(STATE_CYCLE_INTERVAL)
 
         except Exception as e:
             if not app_state.control_loop_stop_event.is_set():
                 print(f"Drone control loop error: {e}")
                 time.sleep(1)
+
 
 
 
