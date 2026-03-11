@@ -145,7 +145,7 @@ def run_state_machine(test_state):
 def run_gstreamer(main_loop):
     pipeline_str = (
         "libcamerasrc ! "
-        "video/x-raw,width=1280,height=720,framerate=30/1 ! "
+        "video/x-raw,width=1280,height=720,framerate=30/1,format=NV12 ! "
         "videoconvert ! "
         "video/x-raw,format=I420 ! "
         "x264enc tune=zerolatency bitrate=1500 speed-preset=superfast key-int-max=15 ! "
@@ -211,7 +211,7 @@ def main():
     sm_thread.start()
 
     
-    gst_thread = threading.Thread(target=run_gstreamer, args=(main_loop), daemon=True)
+    gst_thread = threading.Thread(target=run_gstreamer, args=(main_loop,), daemon=True)
     gst_thread.start()
 
     try:
