@@ -441,6 +441,7 @@ def run_drone_control(app_state, drone_controller):
 
     hover_lost_time = None
     hold_start_time = None
+    last_print = "" 
 
     while not app_state.control_loop_stop_event.is_set():
         try:
@@ -462,25 +463,31 @@ def run_drone_control(app_state, drone_controller):
                         target_bbox = target_data['bbox']
 
             if current_state == "MANUAL":
-                print("STATE: MANUAL | Waiting for target selection...        ", end='\r')
+                msg = "STATE: MANUAL | Waiting for target selection..."
 
             elif current_state == "TRACKING":
                 if target_id is None:
                     print("\n[TRACKING] Target cleared. Returning to MANUAL.")
                     with app_state.drone_state_lock:
                         app_state.drone_state = "MANUAL"
+                    last_print = ""
+                    time.sleep(STATE_CYCLE_INTERVAL)
+                    continue
 
                 elif target_bbox is None:
                     print("\n[TRACKING] Target lost. Transitioning to HOVERING.")
                     hover_lost_time = time.time()
                     with app_state.drone_state_lock:
                         app_state.drone_state = "HOVERING"
+                    last_print = ""
+                    time.sleep(STATE_CYCLE_INTERVAL)
+                    continue
 
                 else:
                     forward_vel, up_vel, yaw_rate, command_string = drone_controller.compute_command(
                         target_bbox, frame_w, frame_h
                     )
-                    print(f"  [TRACKING] {command_string}        ", end='\r')
+                    msg = f"[TRACKING] {command_string}"
 
             elif current_state == "HOVERING":
                 elapsed = time.time() - hover_lost_time
@@ -491,15 +498,21 @@ def run_drone_control(app_state, drone_controller):
                     hover_lost_time = None
                     with app_state.drone_state_lock:
                         app_state.drone_state = "TRACKING"
+                    last_print = ""
+                    time.sleep(STATE_CYCLE_INTERVAL)
+                    continue
 
                 elif elapsed >= TARGET_LOST_HOVER_TIMEOUT:
                     print("\n[HOVERING] Timeout elapsed. Transitioning to RETURNING.")
                     hold_start_time = time.time()
                     with app_state.drone_state_lock:
                         app_state.drone_state = "RETURNING"
+                    last_print = ""
+                    time.sleep(STATE_CYCLE_INTERVAL)
+                    continue
 
                 else:
-                    print(f"  [HOVERING] Searching for target... ({remaining:.1f}s)        ", end='\r')
+                    msg = f"[HOVERING] Searching for target... ({remaining:.1f}s)"
 
             elif current_state == "RETURNING":
                 elapsed = time.time() - hold_start_time
@@ -512,8 +525,16 @@ def run_drone_control(app_state, drone_controller):
                     with app_state.drone_state_lock:
                         app_state.drone_state = "MANUAL"
                     hold_start_time = None
+                    last_print = ""
+                    time.sleep(STATE_CYCLE_INTERVAL)
+                    continue
+
                 else:
-                    print(f"  [RETURNING] Holding position... ({remaining:.1f}s)        ", end='\r')
+                    msg = f"[RETURNING] Holding position... ({remaining:.1f}s)"
+
+            if msg != last_print:
+                print(f"  {msg}        ", end='\r')
+                last_print = msg
 
             time.sleep(STATE_CYCLE_INTERVAL)
 
@@ -521,7 +542,6 @@ def run_drone_control(app_state, drone_controller):
             if not app_state.control_loop_stop_event.is_set():
                 print(f"Drone control loop error: {e}")
                 time.sleep(1)
-
 
 
 
