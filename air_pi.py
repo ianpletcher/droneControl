@@ -408,20 +408,20 @@ def run_command_server(app_state):
                         command = json.loads(data.decode('utf-8'))
                         if 'target_id' in command:
                             new_target_id = command['target_id']
+                          with app_state.drone_state_lock:
                             with app_state.target_lock:
                                 app_state.target_id = new_target_id
-                            with app_state.drone_state_lock:
+                        
                                 if new_target_id is not None:
                                     if app_state.drone_state == "MANUAL":
                                         app_state.drone_state = "TRACKING"
                                         print(f"\n[MANUAL] → TRACKING: Target ID {new_target_id} selected.")
                                     else:
                                         app_state.drone_state = "TRACKING"
-                                        print(f"\n[{app_state.drone_state}] → TRACKING: Target switched to ID {new_target_id}.")
+                                        print(f"\n[TRACKING] Target switched to ID {new_target_id}.")
                                 else:
                                     app_state.drone_state = "MANUAL"
                                     print("\nTarget cleared by operator. Returning to MANUAL.")
-                            print(f"\nTarget set by ground station: ID {new_target_id}")
 
 
             except socket.timeout:
