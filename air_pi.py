@@ -21,6 +21,7 @@ import tomllib #or tomli?
 from mavsdk import System
 from pathlib import Path
 from pymavlink import mavutil
+import logging
 
 """
 When utilizing WFB-NG we need to make sure only specific data is being sent over the IPV4 link.
@@ -398,6 +399,7 @@ class AppState:
         self.target_lock = threading.Lock()
         self.tracker_lock = threading.Lock()
         self.frame_size_lock = threading.Lock()
+        self.velocity_lock = threading.Lock()
 
         # TODO: New test thread locks for debuffing
         self.drone_state_lock = threading.Lock()
@@ -628,9 +630,10 @@ def run_command_server(app_state):
 # Drone Control Loop (MAVLink) Thread
 # -----------------------------------------------------------------------------------------------
 
-def run_drone_control(app_state, drone_controller, bbox):
+def run_drone_control(app_state, drone_controller, bbox=None):
     print("Drone control loop running (TEST MODE).")
-
+    
+    command_count = 0
 # Implement safety feature if commands stop, such as hovering or returning home after time out.
     while not app_state.control_loop_stop_event.is_set():
         try:
@@ -655,13 +658,16 @@ def run_drone_control(app_state, drone_controller, bbox):
             )
             with app_state.velocity_lock:
                 app_state.forward_velocity = forward_velocity
-                app_state.up_velocit = up_velocity
+                app_state.up_velocity = up_velocity
                 app_state.yaw_velocity = yaw_velocity
-            print(f"Control Loop: {command_str}")
+            
             time.sleep(0.1)
 
             # Mofify to print when the abs changes by 0.5 or so
-            print(f"{command_str}", end='\r') #might be heavy, since it prints every single command.
+            if (abs(forward_velocity) > 0.1 or abs(up_velocity) > 0.1 or abs(yaw_velocity) > 1.0):
+                command_count += 1
+            if command_count % 20 == 0: # print every 20 commands
+                print(f"{command_str}", end='\r') #might be heavy, since it prints every single command.
             # modfify to log or print in interval.
 
             time.sleep(0.1) #this is currently at 10hz which does not account for process
@@ -673,7 +679,7 @@ def run_drone_control(app_state, drone_controller, bbox):
 
 
 
-async def run_drone_control_async(app_state, drone_controller, bbox):
+async def run_drone_control_async(app_state, drone_controller, bbox=None):
         
     drone = System()   #used SERIAL_PORT before, now 
     print(f"Connecting to drone on {COMMAND_PORT}...")
