@@ -29,13 +29,8 @@ class TestState:
         self.target_id = None               
         self.state_lock = threading.Lock()  
         self.stop_event = threading.Event() 
-        self.textoverlay = None             
-        self.overlay_lock = threading.Lock()
 
-    def set_overlay(self, text):            
-        with self.overlay_lock:
-            if self.textoverlay is not None:
-                self.textoverlay.set_property('text', text)
+
 
 
 # -----------------------------------------------------------------------------------------------
@@ -75,8 +70,7 @@ def run_state_machine(test_state):
 
           
             if current_state == "MANUAL":
-                overlay_text = "STATE: MANUAL | Waiting for target selection..."  
-                test_state.set_overlay(overlay_text)                               
+                print("STATE: MANUAL | Waiting for target selection...")      
 
                 if target_id is not None:
                     print("\n[MANUAL] Target selected. Engaging offboard mode.")
@@ -87,8 +81,7 @@ def run_state_machine(test_state):
 
             elif current_state == "TRACKING":
                 target_found = target_id is not None
-                overlay_text = f"STATE: TRACKING | Target ID: {target_id}"       
-                test_state.set_overlay(overlay_text)                               
+                print(f"STATE: TRACKING | Target = {target_id}"                             
 
                 if target_id is None:
                     print("\n[TRACKING] Target cleared by operator. Returning to MANUAL.")
@@ -108,8 +101,7 @@ def run_state_machine(test_state):
             elif current_state == "HOVERING":
                 elapsed = time.time() - hover_lost_time
                 remaining = TARGET_LOST_HOVER_TIMEOUT - elapsed
-                overlay_text = f"STATE: HOVERING | Target lost — searching... ({remaining:.1f}s)"  
-                test_state.set_overlay(overlay_text)                                                
+                print("STATE: HOVERING | Target Lost")                                                
 
                 if target_id is not None:
                     print("\n[HOVERING] Target reacquired. Resuming TRACKING.")
@@ -129,8 +121,7 @@ def run_state_machine(test_state):
             elif current_state == "RETURNING":
                 elapsed = time.time() - hold_start_time
                 remaining = HOLD_BEFORE_MANUAL_DURATION - elapsed
-                overlay_text = f"STATE: RETURNING | Holding position... ({remaining:.1f}s)" 
-                test_state.set_overlay(overlay_text)                                         
+                print("STATE: RETURNING")                                      
 
                 if elapsed >= HOLD_BEFORE_MANUAL_DURATION:
                     print("\n[RETURNING] Hold complete. Stopping offboard. Returning to MANUAL.")
@@ -151,15 +142,11 @@ def run_state_machine(test_state):
 # -----------------------------------------------------------------------------------------------
 # GStreamer Pipeline
 # -----------------------------------------------------------------------------------------------
-def run_gstreamer(main_loop, test_state):
+def run_gstreamer(main_loop):
     pipeline_str = (
         "libcamerasrc ! "
         "video/x-raw,width=1280,height=720,framerate=30/1 ! "
         "videoconvert ! "
-        "textoverlay name=overlay "
-        "text='STATE: MANUAL' "
-        "valignment=top halignment=left "
-        "font-desc='Sans Bold 18' ! "
         "video/x-raw,format=I420 ! "
         "x264enc tune=zerolatency bitrate=1500 speed-preset=superfast key-int-max=15 ! "
         "h264parse ! "
@@ -172,13 +159,6 @@ def run_gstreamer(main_loop, test_state):
     pipeline = None
     try:
         pipeline = Gst.parse_launch(pipeline_str)
-        overlay_element = pipeline.get_by_name("overlay")
-        if overlay_element:
-            test_state.textoverlay = overlay_element
-        else:
-            print("Overlay will not function.")
-
-
         bus = pipeline.get_bus()
         bus.add_signal_watch()
 
@@ -231,7 +211,7 @@ def main():
     sm_thread.start()
 
     
-    gst_thread = threading.Thread(target=run_gstreamer, args=(main_loop, test_state), daemon=True)
+    gst_thread = threading.Thread(target=run_gstreamer, args=(main_loop), daemon=True)
     gst_thread.start()
 
     try:
