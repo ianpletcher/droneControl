@@ -23,43 +23,6 @@ from pathlib import Path
 from pymavlink import mavutil
 import logging
 
-"""
-When utilizing WFB-NG we need to make sure only specific data is being sent over the IPV4 link.
-Video stream and MAvlink has more overhead than UDP in this case.
-Only data we should reasonable send over is telementary and command data. 
-We can use UDP for telemetry and TCP for commands.
-There is an aggregation feature for Aggregation of mavlink and tunnel packets. Doesn't send wifi packet for every mavlink or tunnel packet.
-
-Maximum throughut of  30Mbit/s
-Aim for 6-7kbps bitrate on camera stream """
-
-
-""" 
-    New Features to add:
-
-- Dynamic Bandwidth adustment to optimize the bitrate of camera stream based on network conditions.
-- Implement features to calculate return to home time based on the battery level.
-- Create better logging for crucial methods for debugging and error handling.
-- Add disconnect and network issue fail safes, i.e. hover in place/return home.
-- Way later on create a desktop application or web based on to dsiplay all of this 
-- Implement better centroid object to track objects that escape view and reappear.
-- Create a command queue to handle command bursts and prevent overload on the drone.
-- Add a jitter reducer to smooth out the drone's movements and prevent over-correction when tracking
-- Possible utilize a thread pool to better manage threads in AppState.
-
-    Computational improvements: 
-
-- Optimize np.clip itilization, likely replace with manual to reduce overhead.
-- Handle fragmentation of packets better using a memoryview.
-- Create better pipeline error handling.
-- Parallelize some of the processing.
-- Cache the centroid tracking to help reduce redundancy.
-- Replace the blocking sockets with async sockets to prevent blocking and improve responsiveness.
-- Use more efficent data tructures in tracking implement.
-- Reduce printing overhead and transition to logging with log levels.
-- 
-"""
-
 # -----------------------------------------------------------------------------------------------
 # Detection Filtering Constants
 # -----------------------------------------------------------------------------------------------
@@ -107,15 +70,7 @@ def load_config(path=None):
         except Exception:
             return {}
         
-"""
-def validate_config(config):
-    if config["network"]["packet_max_bytes"] <= 0:
-        raise ValueError("packet_max_bytes must be greater than 0")
-    if config["controller"]["yaw_gain"] >= 0:
-        raise ValueError("yaw_gain must be negative")
-"""
-
-
+        
 # Read config and apply defaults
 _CFG = load_config()
 _NET = _CFG.get("network", {})
@@ -128,18 +83,7 @@ COMMAND_PORT = int(_NET.get("command_port", 5603))
 # Telemetry Sender
 # -----------------------------------------------------------------------------------------------
 
-"""
-    Function needs to react to signal strength. Change packet size based on this.
-    Could help more reliability over UDP + distance
-    
-    Number of failed sends, then switch to low bandwidth mode and recuce packet size.
 
-    Need failsafe for disconnection.
-    Hover in place when disconnected, then return home after 30-60 sec timeout.
-
-    Make function to calc travel time back home based on battery.
-    Need to understand battery drain and total capacity based on factors. 
-    Calculate that into remaining flight time so we can avoid losing the drone."""
 
 PACKET_MAX_BYTES  = 1400 
 PACKET_HEADER_FMT = "!IHH"   #seq (I = uint32), frag_id (H = uint16), frag_count (H = uint16)
@@ -219,12 +163,6 @@ class DroneCommandController: # FIXME: rename to something like TargetTracker or
         bbox_area = dx * dy
         bbox_center_x = start_x + (dx * 0.5)
         bbox_center_y = start_y + (dy * 0.5)
-
-        """  - Previous computation
-        (start_x, start_y, end_x, end_y) = bbox
-        bbox_center_x = (start_x + end_x) / 2
-        bbox_center_y = (start_y + end_y) / 2
-        bbox_area = (end_x - start_x) * (end_y - start_y)"""
 
         target_area = (frame_width * frame_height) * self.TARGET_BBOX_AREA_RATIO
 
@@ -916,19 +854,9 @@ def main():
 
     model_path = find_best_model()
 
-    # --- FIXED PIPELINE based on official Hailo examples ---
-    # Key changes:
-    # 1. Scale to 640x640 BEFORE hailonet
-    # 2. Add hailofilter with post-process .so file and thresholds
-    # 3. Use proper queue structure with leaky queues
-    # 4. RGB format for AI processing
-    # 5. Increased UDP buffer and async sending
-
-
     def QUEUE(name, max_size_buffers=3, leaky="downstream"):
         """Create a leaky queue to prevent blocking"""
         return f"queue name={name} leaky={leaky} max-size-buffers={max_size_buffers} max-size-bytes=0 max-size-time=0 ! "
-
 
     pipeline_str = (
         # Camera source at native resolution
@@ -985,9 +913,6 @@ def main():
     except KeyboardInterrupt:
         print("\nShutdown requested by user (Ctrl+C)...")
 
-    # We might want to impliment a safe gaurd against shutting the scripts down while the drone is in flight.
-    # For example, we could require a double Ctrl+C within 5 seconds to confirm shutdown, or check if the drone is currently tracking a target before allowing shutdown.
-    # Or inputting a command from the ground station to allow shutdown. For now, we will just allow immediate shutdown on Ctrl+C, but this is an important safety consideration for real-world use.
     finally:
         print("Shutting down...")
 
