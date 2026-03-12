@@ -3,13 +3,15 @@
 [network]
 ground_ip = "10.5.0.1"
 air_ip = "10.5.0.2"
-video_port = 5000
-data_port = 5001
-command_port = 5002
+ground_ip_gadget = "10.55.0.1"
+video_port = 5602
+data_port = 5601
+command_port = 5603
 use_multicast = false
 multicast_group = "239.255.0.1"
 # Check what the code currently uses in this regard #
 packet_max_bytes = 1400
+
 
 
 [hailo]

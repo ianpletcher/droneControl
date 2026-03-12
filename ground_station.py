@@ -68,7 +68,7 @@ def load_config(path=None):
 # Read config and apply defaults
 _CFG = load_config()
 _NET = _CFG.get("network", {})
-RADXA_GADGET_IP = _NET.get("air_ip", "10.5.0.1")
+RADXA_GADGET_IP = _NET.get("ground_gadget_ip", "10.55.0.1")
 VIDEO_STREAM_PORT = int(_NET.get("video_port", 5602)) # Port to listen on for H.264 video (forwarded from drone)
 DATA_PORT = int(_NET.get("data_port", 5601)) # Port to listen on for tracking data (forwarded from drone)
 COMMAND_PORT = int(_NET.get("command_port", 5603)) # Port to send commands to (Radxa forwards to drone)
