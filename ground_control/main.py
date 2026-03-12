@@ -13,37 +13,10 @@ from data_cmd import run_data_receiver
 from video import run_gstreamer_receiver
 from ui import handle_input, render_graphics
 
-#Ideas for ground station: 
-# - Instead of just having users click on bbox to track, have a "selection mode" or a key on side of display. Make it hidden at first and popout with an arrow
-
-''' 
-Make sure camera stream is split 640*640 for AI processing and 1280*720 for display.
-Split the camera feed with a tee in GStreamer.
-Implement Multiplexing on the 2.4ghz 
-Use 5.0 as primary until range exceeds 5.0 capabilities, then switch to 2.4ghz
-Send Commands over TCP and Video over UDP.
-'''
-
-# -----------------------------------------------------------------------------------------------
-# Network Configuration (configurable via config.toml)
-# -----------------------------------------------------------------------------------------------
-# Original hard-coded values (kept commented so you can revert if needed):
-# NOTE: This Pi's IP is 192.168.0.169.
-# We are listening on all interfaces (0.0.0.0).
-
-
-# Radxa Zero 3W USB Ethernet Gadget IP (usb0 interface, static 10.55.0.1)
-# The Radxa forwards all three streams transparently between the drone and this laptop.
-""" RADXA_GADGET_IP = "10.55.0.1"         # Radxa USB gadget IP (forwards commands to drone)
-VIDEO_STREAM_PORT = 5602         # Port to listen on for H.264 video (forwarded from drone)
-DATA_PORT = 5601                 # Port to listen on for tracking data (forwarded from drone)
-COMMAND_PORT = 5603              # Port to send commands to (Radxa forwards to drone) """
-
-# -----------------------------------------------------------------------------------------------
-# Main Function
-# -----------------------------------------------------------------------------------------------
 def main():
-    """Main entry point"""
+    """
+    Main entry point
+    """
    
     # Init GStreamer and GLib main loop
     Gst.init(None)
