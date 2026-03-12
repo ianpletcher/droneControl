@@ -878,7 +878,7 @@ def main():
         # Note: hailofilter thresholds will be applied in Python filtering below
         f"hailofilter so-path={postprocess_so} qos=false ! " +
         QUEUE("queue_appsink", max_size_buffers=2, leaky="downstream") +
-        "appsink name=appsink emit-signals=true sync=false max-buffers=2 drop=true async=false "  # async=false prevents blocking
+        "appsink name=appsink emit-signals=true sync=false max-buffers=2 drop=true async=false " + 
         
         # --- Path 2: Network Stream ---
         "t. ! " +
