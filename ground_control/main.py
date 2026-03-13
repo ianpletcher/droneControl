@@ -4,6 +4,7 @@ from gi.repository import Gst, GObject, GLib
 # do we not need to specify gst_bin as gst?
 import os
 import sys
+import platform
 import pygame #rendering UI
 import threading
 
@@ -39,8 +40,14 @@ def main():
     data_thread = threading.Thread(target=run_data_receiver, args=(app_state,), daemon=True)
     data_thread.start()
 
-    # Set to use Cocoa video driver for macOS, may need adjustment for other platforms
-    os.environ.setdefault('SDL_VIDEODRIVER', 'cocoa')
+    # Set appropriate SDL video driver based on operating system
+    system = platform.system()
+    if system == 'Darwin':  # macOS
+        os.environ.setdefault('SDL_VIDEODRIVER', 'cocoa')
+    elif system == 'Linux':
+        os.environ.setdefault('SDL_VIDEODRIVER', 'x11')
+    elif system == 'Windows':
+        os.environ.setdefault('SDL_VIDEODRIVER', 'windib')
    
     # Initialize pygame
     pygame.init()

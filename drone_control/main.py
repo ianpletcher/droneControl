@@ -54,7 +54,7 @@ def main():
 
     pipeline_str = (
         # Camera source at native resolution
-        "libcamerasrc ! "
+        "libcamerasrc name=libcamerasrc ! "
         "video/x-raw,width=1920,height=1080,framerate=30/1,format=NV12 ! "
 
         # Split into two paths

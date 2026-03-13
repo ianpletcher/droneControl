@@ -10,7 +10,7 @@ from gi.repository import Gst
 
 from vid_cmd_data import send_telemetry_udp, GROUND_STATION_IP, DATA_PORT
 
-MIN_CONFIDENCE = 0.3
+MIN_CONFIDENCE = 0.35
 MIN_BBOX_AREA = 1000
 
 script_dir = Path(__file__).parent
@@ -67,6 +67,10 @@ def find_best_model():
         sys.exit(1)
 
 def on_new_hailo_sample(appsink, app_state): 
+    app_state.frame_count = getattr(app_state, 'frame_count', 0) + 1
+    if app_state.frame_count % 120 == 0:
+        print(f"Processing frame {app_state.frame_count}...", flush=True)   
+    
     sample = appsink.emit('pull-sample')
     if not sample:
         return Gst.FlowReturn.OK
@@ -81,12 +85,13 @@ def on_new_hailo_sample(appsink, app_state):
     caps = sample.get_caps()
     structure = caps.get_structure(0)
     
-    width, height = 640, 640
+    net_w, net_h = 1280, 720
+    
     with app_state.frame_size_lock:
-        if app_state.frame_width != width or app_state.frame_height != height:
-            app_state.frame_width = width
-            app_state.frame_height = height
-            print(f"Detected frame size: {width}x{height}")
+        if app_state.frame_width != net_w or app_state.frame_height != net_h:
+            app_state.frame_width = net_w
+            app_state.frame_height = net_h
+            print(f"Detected frame size: {net_w}x{net_h}")
 
 
     current_detections_info = [] 
@@ -105,7 +110,6 @@ def on_new_hailo_sample(appsink, app_state):
         
         ai_w, ai_h = 640, 640 # AI inference resolution
         
-        net_w, net_h = 1280, 720 # Network video resolution
         scale_x = net_w / ai_w
         scale_y = net_h / ai_h
 
@@ -127,6 +131,13 @@ def on_new_hailo_sample(appsink, app_state):
 
             if (xmax - xmin) * (ymax - ymin) < MIN_BBOX_AREA:
                 continue
+            
+            EDGE_EXCLUSION_MARGIN = 60  # pixels, in 1280x720 space
+            
+            if xmin < EDGE_EXCLUSION_MARGIN or xmax > (net_w - EDGE_EXCLUSION_MARGIN):
+                continue
+            if ymin < EDGE_EXCLUSION_MARGIN or ymax > (net_h - EDGE_EXCLUSION_MARGIN):
+                continue
 
             current_detections_info.append({
                 'bbox': (xmin, ymin, xmax, ymax),
@@ -140,7 +151,7 @@ def on_new_hailo_sample(appsink, app_state):
 
     # Gathering data to serialize and send to ground station
     with app_state.tracker_lock:
-        tracked_objects = app_state.tracker.update(current_detections_info, width) #not AppState?
+        tracked_objects = app_state.tracker.update(current_detections_info, net_w, net_h)
         snapshot = tracked_objects.copy()  # cheap shallow snapshot of mapping
 
     try:
@@ -179,19 +190,14 @@ def on_new_hailo_sample(appsink, app_state):
 
             data_to_send.append(item)
 
-# -----------------------------------------------------------------------------------------------
-# Serialization of Metadata
-# -----------------------------------------------------------------------------------------------
-# Add more telemetry data as needed, such as frame timestamp, processing latency, etc.
-
-        app_state.seq += 1
-        # Build the telemetry envelope
-        wrapper = {
-            'seq':       app_state.seq,
-            'timestamp': time.time(),
-            'objects':   data_to_send,
-        }
-
+            app_state.seq += 1
+            # Build the telemetry envelope
+            wrapper = {
+                'seq':       app_state.seq,
+                'timestamp': time.time(),
+                'objects':   data_to_send,
+            }
+    
         # Serialise and send (auto-fragmented to stay within MTU)
         msgpack_data = msgpack.packb(wrapper, use_bin_type=True)
         send_telemetry_udp(app_state.data_socket, (GROUND_STATION_IP, DATA_PORT),

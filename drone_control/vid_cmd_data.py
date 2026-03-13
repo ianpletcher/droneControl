@@ -45,7 +45,7 @@ def run_gstreamer(app_state, main_loop, pipeline_str):
     pipeline = None #default pipeline state to allow for graceful error handling
     try:
         pipeline = Gst.parse_launch(pipeline_str)
-
+        
         appsink = pipeline.get_by_name("appsink") #parse appsink from pipeline
         if not appsink:
             print("ERROR: Could not find 'appsink' element in pipeline.")

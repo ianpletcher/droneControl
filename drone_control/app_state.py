@@ -5,7 +5,15 @@ import socket
 class AppState:
     def __init__(self):
 
-        self.tracker = CentroidTracker(max_disappeared=10) #what is a centroid? 
+        self.tracker = CentroidTracker(
+            max_disappeared=30, 
+            max_distance_ratio=0.4, 
+            hit_streak_required=5,
+            velocity_decay=0.5,
+            edge_margin=100,
+            next_id_counter=1,
+            )
+        
         self.target_id = None
         self.gst_error_event = threading.Event()
 
