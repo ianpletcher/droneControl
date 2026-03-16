@@ -2,6 +2,7 @@ import numpy as np
 from scipy.spatial.distance import cdist
 from collections import OrderedDict
 import logging
+import cv2 as cv
 
 logging.basicConfig(level=logging.INFO, format='%(asctime)s - %(levelname)s - %(message)s')
 
@@ -17,9 +18,10 @@ class CentroidTracker:
         next_id_counter=1,
     ):
         # Confirmed tracks, keyed by object ID with detection info dicts
-        self.tracked_objects    = OrderedDict() # Mapping object ids to detection info dicts
+        self.tracked_objects = OrderedDict() # Mapping object ids to detection info dicts
         self.disappeared_frames = OrderedDict() # Mapping object ids to missed frame counts
-        self.velocities         = OrderedDict() # Mapping object ids to velocity tuples
+        self.velocities = OrderedDict() # Mapping object ids to velocity tuples
+        self.colors = OrderedDict() # Mapping confirmed tracks to color data from frame
 
         # Tentative tracks, keyed by tentative id with detection info dicts and hit counts
         self._tentative_objects = OrderedDict()  # Mapping tent ids to detection info dicts
@@ -82,6 +84,7 @@ class CentroidTracker:
                 
                 # if the distance is within the prediciton threshold, we consider a match and update
                 # FIXME - this assumes constant velocity between frames, which is not always the case
+                
                 object_id = confirmed_ids[row] # Get the object ID corresponding to this row index
                 self._update_confirmed_track(object_id, current_detections_info[col]) # Update confirmed track
                 matched_confirmed_rows.add(row) # Mark this confirmed track as matched by adding to set
