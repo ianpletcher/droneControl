@@ -4,6 +4,7 @@ import time
 import socket
 import msgpack
 import hailo
+import logging
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst
@@ -14,6 +15,8 @@ MIN_CONFIDENCE = 0.35
 MIN_BBOX_AREA = 1000
 
 script_dir = Path(__file__).parent
+
+logging.basicConfig(level=logging.INFO)
 
 def find_best_model():
         """Find the best available COCO detection model for this device"""
@@ -26,9 +29,9 @@ def find_best_model():
                                   capture_output=True, text=True, timeout=5)
             is_hailo8l = 'HAILO8L' in result.stdout
             arch_name = "Hailo-8L (13 TOPS)" if is_hailo8l else "Hailo-8 (26 TOPS)"
-            print(f"Detected device: {arch_name}")
+            logging.info(f"Detected device: {arch_name}")
         except Exception as e:
-            print(f"Could not detect architecture, assuming Hailo-8L: {e}")
+            logging.error(f"Could not detect architecture, assuming Hailo-8L: {e}")
 
         # Choose appropriate models for architecture
         if is_hailo8l:
@@ -59,19 +62,19 @@ def find_best_model():
             for model_name in model_priority:
                 model_path = path / model_name
                 if model_path.exists():
-                    print(f"Found model: {model_path}")
+                    logging.info(f"Found model: {model_path}")
                     return model_path
 
-        print("ERROR: No compatible model found!")
-        print("Run: cd ~/hailo-rpi5-examples && ./download_resources.sh --all")
+        logging.error("ERROR: No compatible model found!")
+        logging.info("Run: cd ~/hailo-rpi5-examples && ./download_resources.sh --all")
         sys.exit(1)
 
 def on_new_hailo_sample(appsink, app_state): 
     app_state.frame_count = getattr(app_state, 'frame_count', 0) + 1
     if app_state.frame_count % 120 == 0:
-        print(f"Processing frame {app_state.frame_count}...", flush=True)   
+        logging.info(f"Processing frame {app_state.frame_count}...", flush=True)   
     
-    sample = appsink.emit('pull-sample')
+    sample = appsink.emit('pull-sample') # Frame from gStreamer pipeline with Hailo metadata
     if not sample:
         return Gst.FlowReturn.OK
 
@@ -82,8 +85,8 @@ def on_new_hailo_sample(appsink, app_state):
     #FIXME 
 
     #extract data from frame
-    caps = sample.get_caps()
-    structure = caps.get_structure(0)
+    """ caps = sample.get_caps()
+    structure = caps.get_structure(0) """
     
     net_w, net_h = 1280, 720
     
@@ -91,13 +94,13 @@ def on_new_hailo_sample(appsink, app_state):
         if app_state.frame_width != net_w or app_state.frame_height != net_h:
             app_state.frame_width = net_w
             app_state.frame_height = net_h
-            print(f"Detected frame size: {net_w}x{net_h}")
+            logging.info(f"Detected frame size: {net_w}x{net_h}")
 
 
     current_detections_info = [] 
     try: #Get interest region and parse the region with the AI inference
-        roi = hailo.get_roi_from_buffer(buffer) 
-        detections = roi.get_objects_typed(hailo.HAILO_DETECTION)
+        roi = hailo.get_roi_from_buffer(buffer)  # Region of interest as hailo.HailoROI object
+        detections = roi.get_objects_typed(hailo.HAILO_DETECTION) # List of hailo.HailoDetection objects with methods like get_label(), get_confidence(), get_bbox()
 
 
         object_labels = ["car", "truck", "bus", "motorbike", "person"]
@@ -141,13 +144,13 @@ def on_new_hailo_sample(appsink, app_state):
 
             current_detections_info.append({
                 'bbox': (xmin, ymin, xmax, ymax),
-                'centroid': (int((xmin + xmax) / 2.0), int((ymin + ymax) / 2.0)), # TODO Cast to int later to save processing time, we can afford floats for centroid calculations
+                'centroid': (int((xmin + xmax) / 2.0), int((ymin + ymax) / 2.0)), 
                 'label': det.get_label(), #comes from object_labels list
                 'confidence': det.get_confidence()
             })
 
     except Exception as e:
-        print(f"Error processing Hailo detections: {e}")
+        logging.error(f"Error processing Hailo detections: {e}")
 
     # Gathering data to serialize and send to ground station
     with app_state.tracker_lock:
@@ -204,8 +207,8 @@ def on_new_hailo_sample(appsink, app_state):
                            app_state.seq, msgpack_data)
 
     except socket.error as e:
-        print(f"Network send error: {e}", end='\r')
+        logging.error(f"Network send error: {e}", end='\r')
     except Exception as e:
-        print(f"Error sending tracking data: {e}")
+        logging.error(f"Error sending tracking data: {e}")
 
     return Gst.FlowReturn.OK

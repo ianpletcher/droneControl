@@ -9,9 +9,11 @@ import math
 import json
 import os
 import asyncio
+import logging
 from mavsdk import System
 from pymavlink import mavutil
 
+logging.basicConfig(level=logging.INFO)
 
 def load_config(path=None):
     path = path or os.environ.get("DRONE_CONFIG", "config.toml")
@@ -134,6 +136,7 @@ def run_command_server(app_state):
                 with conn:
                     data = conn.recv(1024)
                     if data:
+                        logging.info(f"Received command from {addr}: {data.decode('utf-8')}")
                         command = json.loads(data.decode('utf-8'))
                         if 'target_id' in command:
                             new_target_id = command['target_id']
@@ -151,7 +154,8 @@ def run_command_server(app_state):
                                 else:
                                     app_state.drone_state = "MANUAL"
                                     print("\nTarget cleared by operator. Returning to MANUAL.")
-
+                    else:
+                        logging.info("Received empty command.")
             except socket.timeout:
                 continue
             except json.JSONDecodeError:

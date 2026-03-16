@@ -67,6 +67,11 @@ def handle_tcp_connection(conn, addr, drone_ip, drone_port, name):
     :param name: Data transmission operation (i.e. 'VIDEO' or 'DATA')
 
     """
+    
+    logging.info(f'{name} TCP connection from {addr}')
+    
+    packets = 0 # Packet count for logging
+    
     try:
         drone_sock = socket.socket(socket.AF_INET, socket.SOCK_STREAM) # TCP socket to connect to drone
         drone_sock.settimeout(5.0) # Set timeout for connection attempts
@@ -79,7 +84,14 @@ def handle_tcp_connection(conn, addr, drone_ip, drone_port, name):
                     if not data:
                         break
                     dst.sendall(data) # Send all data to destination
-            except Exception:
+                    nonlocal packets
+                    packets += 1
+                    if packets % 100 == 0: # Log every 100 packets
+                        logging.info(f'{label} forwarded {packets} packets')
+                    
+            except Exception as e:
+                if running:
+                    logging.error(f'{label} relay error: {e}')
                 pass
             finally:
                 src.close()
@@ -126,7 +138,7 @@ def forward_tcp(listen_port, dest_ip, dest_port, name):
             conn, addr = server.accept() # Wait for a laptop to connect
             tcp_handler_thread = threading.Thread(target=handle_tcp_connection, 
             args=(conn, addr, dest_ip, dest_port, name), daemon=True) # Handle connection in separate thread
-            tcp_handler_thread.start() 
+            tcp_handler_thread.start()
         except socket.timeout:
             logging.warning('socket timeout')
             continue

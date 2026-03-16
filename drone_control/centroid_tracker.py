@@ -43,8 +43,7 @@ class CentroidTracker:
           Pass 2 — match remaining detections against tentative tracks
           Remainder — create new tentative entries
 
-        Returns only confirmed tracked_objects (same dict as before),
-        so the rest of the pipeline requires no changes.
+        Returns only confirmed tracked_objects (same dict as before)
         
         :param current_detections_info: list of detection info dicts with at least 'centroid' key
         :param frame_width: width of the video frame (for distance normalization)
@@ -58,36 +57,38 @@ class CentroidTracker:
             self._age_tentative(set())
             return self.tracked_objects
 
-        input_centroids = np.array([d['centroid'] for d in current_detections_info])
+        input_centroids = np.array([d['centroid'] for d in current_detections_info]) # Current frame centroid vectors
 
         # First pass, match against confirmed tracks with velocity-predicted centroids to handle motion
         unmatched_detection_cols = set(range(len(current_detections_info)))
 
         if self.tracked_objects:
-            confirmed_ids  = list(self.tracked_objects.keys())
+            confirmed_ids  = list(self.tracked_objects.keys()) 
             predicted      = self._build_predicted_centroids(confirmed_ids, frame_width, frame_height)
-            prev_centroids = np.array(predicted)
+            prev_centroids = np.array(predicted) # Predicted centroid vectors for confirmed tracks based on velocity
 
-            distance = cdist(prev_centroids, input_centroids)
-            rows = distance.min(axis=1).argsort()
-            cols = distance.argmin(axis=1)[rows]
+            distance = cdist(prev_centroids, input_centroids) # Distance matrix between predicted centroids and current detections
+            rows = distance.min(axis=1).argsort() # Sort confirmed tracks by closets distance
+            cols = distance.argmin(axis=1)[rows] # Get index of closest detection for each confirmed track in sorted order
 
             matched_confirmed_rows = set()
             matched_detection_cols = set()
 
             for row, col in zip(rows, cols):
-                if row in matched_confirmed_rows or col in matched_detection_cols:
+                if row in matched_confirmed_rows or col in matched_detection_cols: # when a match has already been made, skip
                     continue
-                if distance[row, col] > max_distance:
+                if distance[row, col] > max_distance: # if the closest match is too far, skip
                     continue
+                
+                # if the distance is within the prediciton threshold, we consider a match and update
+                # FIXME - this assumes constant velocity between frames, which is not always the case
+                object_id = confirmed_ids[row] # Get the object ID corresponding to this row index
+                self._update_confirmed_track(object_id, current_detections_info[col]) # Update confirmed track
+                matched_confirmed_rows.add(row) # Mark this confirmed track as matched by adding to set
+                matched_detection_cols.add(col) # Mark this detection as matched by adding to set
 
-                object_id = confirmed_ids[row]
-                self._update_confirmed_track(object_id, current_detections_info[col])
-                matched_confirmed_rows.add(row)
-                matched_detection_cols.add(col)
-
-            self._age_confirmed(matched_confirmed_rows)
-            unmatched_detection_cols -= matched_detection_cols
+            self._age_confirmed(matched_confirmed_rows) # Age any confirmed tracks that were not matched this frame
+            unmatched_detection_cols -= matched_detection_cols # Remove matched detections from the unmatched set for the next pass
 
         else:
             self._age_confirmed(set())
@@ -95,7 +96,7 @@ class CentroidTracker:
         # Second pass, match remaining detections against tentative tracks without velocity since they are not confirmed yet
         still_unmatched_cols = set(unmatched_detection_cols)
 
-        if self._tentative_objects and unmatched_detection_cols:
+        if self._tentative_objects and unmatched_detection_cols: # Try to match if tentative tracks exist and unmatched detections remain
             tent_ids       = list(self._tentative_objects.keys())
             tent_centroids = np.array([
                 self._tentative_objects[tid]['centroid'] for tid in tent_ids
@@ -117,12 +118,14 @@ class CentroidTracker:
                     continue
                 if tent_dist[row, col] > max_distance:
                     continue
-
+                
+                
+                # If a tentative track is close enough to a detection, consider it a hit
                 tent_id      = tent_ids[row]
                 original_col = unmatched_col_list[col]
 
                 self._tentative_objects[tent_id] = current_detections_info[original_col]
-                self._tentative_hits[tent_id]   += 1
+                self._tentative_hits[tent_id]   += 1 # Update hit count for future promotion
 
                 logging.debug(
                     f"Tentative {tent_id} hit streak: "
@@ -130,7 +133,7 @@ class CentroidTracker:
                 )
 
                 if self._tentative_hits[tent_id] >= self.hit_streak_required:
-                    self._promote_tentative(tent_id)
+                    self._promote_tentative(tent_id) # Promote to confirmed
 
                 matched_tent_rows.add(row)
                 matched_tent_cols.add(col)
@@ -162,14 +165,15 @@ class CentroidTracker:
         """
         predicted = []
         for object_id in object_ids:
-            cx, cy = self.tracked_objects[object_id]['centroid']
-            vx, vy = self.velocities.get(object_id, (0, 0))
+            cx, cy = self.tracked_objects[object_id]['centroid'] # Centroid of most recent detection for this track
+            vx, vy = self.velocities.get(object_id, (0, 0)) # Velocity for this track, default to (0, 0) if not available
 
-            edge_proximity  = min(cx, frame_width - cx, cy, frame_height - cy)
-            velocity_weight = float(np.clip(edge_proximity / self.edge_margin, 0.0, 1.0))
-
-            px = int(np.clip(cx + vx * velocity_weight, 0, frame_width - 1))
-            py = int(np.clip(cy + vy * velocity_weight, 0, frame_height - 1))
+            edge_proximity  = min(cx, frame_width - cx, cy, frame_height - cy) # Distance to nearest edge of the frame
+            velocity_weight = float(np.clip(edge_proximity / self.edge_margin, 0.0, 1.0)) # Velocity's influence lowers as detections reach the edge to account for partial occlusion.
+            
+            # Predicted centroid coordinates based on current velocity, clipped to frame bounds
+            px = int(np.clip(cx + vx * velocity_weight, 0, frame_width - 1))  
+            py = int(np.clip(cy + vy * velocity_weight, 0, frame_height - 1)) 
             predicted.append((px, py))
         return predicted
 
@@ -182,9 +186,9 @@ class CentroidTracker:
         """
         prev_centroid = self.tracked_objects[object_id]['centroid']
         new_centroid  = detection_info['centroid']
-        vx = new_centroid[0] - prev_centroid[0]
-        vy = new_centroid[1] - prev_centroid[1]
-        self.velocities[object_id] = (vx, vy)
+        vx = new_centroid[0] - prev_centroid[0] # Per-frame x-direction velocity (pixels/franme)
+        vy = new_centroid[1] - prev_centroid[1] # Per-frame y-direction velocity (pixels/frame)
+        self.velocities[object_id] = (vx, vy) # Add or update velocity for this track
 
         if vx != 0 or vy != 0:
             logging.debug(f"Object {object_id} velocity: ({vx}, {vy})")
