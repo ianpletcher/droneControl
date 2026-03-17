@@ -8,11 +8,12 @@ import logging
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst
+import numpy as np
 
 from vid_cmd_data import send_telemetry_udp, GROUND_STATION_IP, DATA_PORT
 
 MIN_CONFIDENCE = 0.35
-MIN_BBOX_AREA = 1000
+MIN_BBOX_AREA = 600
 
 script_dir = Path(__file__).parent
 
@@ -82,19 +83,23 @@ def on_new_hailo_sample(appsink, app_state):
     if not buffer:
         return Gst.FlowReturn.OK
     
-    #FIXME 
-
-    #extract data from frame
-    """ caps = sample.get_caps()
-    structure = caps.get_structure(0) """
+    caps = sample.get_caps()
+    width = caps.get_structure(0).get_value('width')
+    height = caps.get_structure(0).get_value('height')
     
     net_w, net_h = 1280, 720
     
+    result, map_info = buffer.map(Gst.MapFlags.READ)
+    if result: 
+        frame = np.frombuffer(map_info.data, dtype=uint8)
+        frame = frame.reshape((height, width, 3))
+        
+    
     with app_state.frame_size_lock:
-        if app_state.frame_width != net_w or app_state.frame_height != net_h:
-            app_state.frame_width = net_w
-            app_state.frame_height = net_h
-            logging.info(f"Detected frame size: {net_w}x{net_h}")
+        if app_state.frame_width != width or app_state.frame_height != height:
+            app_state.frame_width = width
+            app_state.frame_height = height
+            logging.info(f"Detected frame size: {width}x{height}")
 
 
     current_detections_info = [] 
@@ -141,12 +146,15 @@ def on_new_hailo_sample(appsink, app_state):
                 continue
             if ymin < EDGE_EXCLUSION_MARGIN or ymax > (net_h - EDGE_EXCLUSION_MARGIN):
                 continue
-
+            
+            centroid = (int((xmin + xmax) / 2.0), int((ymin + ymax) / 2.0)) #centroid of detection
+            
             current_detections_info.append({
                 'bbox': (xmin, ymin, xmax, ymax),
-                'centroid': (int((xmin + xmax) / 2.0), int((ymin + ymax) / 2.0)), 
-                'label': det.get_label(), #comes from object_labels list
-                'confidence': det.get_confidence()
+                'centroid': centroid, 
+                'label': det.get_label(), # comes from object_labels list
+                'confidence': det.get_confidence(),
+                'color' : frame[centroid] #
             })
 
     except Exception as e:

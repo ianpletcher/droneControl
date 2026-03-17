@@ -53,6 +53,7 @@ class CentroidTracker:
         :return: dict of confirmed tracked objects with their detection info
         """
         max_distance = frame_width * self.max_distance_ratio
+        max_color_distance = 20.0
 
         if not current_detections_info: # If there are no detections, age all confirmed and tentative tracks and return
             self._age_confirmed(set())
@@ -81,8 +82,10 @@ class CentroidTracker:
                     continue
                 if distance[row, col] > max_distance: # if the closest match is too far, skip
                     continue
+                if self._calculate_color_distance > max_color_distance: # if closest match isn't close in color, skip
+                    continue
                 
-                # if the distance is within the prediciton threshold, we consider a match and update
+                # if the color and distance are within the prediciton threshold, we consider a match and update
                 # FIXME - this assumes constant velocity between frames, which is not always the case
                 
                 object_id = confirmed_ids[row] # Get the object ID corresponding to this row index
@@ -179,6 +182,22 @@ class CentroidTracker:
             py = int(np.clip(cy + vy * velocity_weight, 0, frame_height - 1)) 
             predicted.append((px, py))
         return predicted
+    
+    def _calculate_color_distance(self, object_id, detection_info):
+        """
+        Calculates and returns the euclidean distance between previous 
+        detection and current frame detection color.
+        
+        :param object_id: ID of the confirmed track to compute color distance
+        :param detection_info: detection info dict from current frame corresponding to this track
+        :return: euclidean distance between previous color and input color as a floating-point number
+        """
+        
+        input_color = detection_info['color']
+        prev_color = self.colors[object_id]
+        
+        return np.linalg.norm(np.array(input_color) - np.array(prev_color))
+        
 
     def _update_confirmed_track(self, object_id, detection_info):
         """
@@ -192,6 +211,8 @@ class CentroidTracker:
         vx = new_centroid[0] - prev_centroid[0] # Per-frame x-direction velocity (pixels/franme)
         vy = new_centroid[1] - prev_centroid[1] # Per-frame y-direction velocity (pixels/frame)
         self.velocities[object_id] = (vx, vy) # Add or update velocity for this track
+        self.colors[object_id] = detection_info['color']
+        logging.debug(f"Object {object_id} color: {self.colors[object_id]}")
 
         if vx != 0 or vy != 0:
             logging.debug(f"Object {object_id} velocity: ({vx}, {vy})")
