@@ -1,3 +1,5 @@
+import numpy as np
+
 class DroneCommandController: # FIXME: rename to something like TargetTracker or DroneController since it also handles target tracking logic, not just command generation
     """Generates velocity commands based on target position in frame"""
 

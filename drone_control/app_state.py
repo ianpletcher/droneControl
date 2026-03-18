@@ -7,11 +7,14 @@ class AppState:
 
         self.tracker = CentroidTracker(
             max_disappeared=30, 
+            tight_distance_ratio=0.2,
             max_distance_ratio=0.4, 
             hit_streak_required=5,
             velocity_decay=0.5,
-            edge_margin=100,
+            edge_margin=50,
             next_id_counter=1,
+            max_color_distance = 90.0,
+            iou_suppresion_thresh=0.3
             )
         
         self.target_id = None

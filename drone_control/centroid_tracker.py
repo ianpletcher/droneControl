@@ -11,11 +11,14 @@ class CentroidTracker:
     def __init__(
         self,
         max_disappeared=30,
+        tight_distance_ratio=0.2,
         max_distance_ratio=0.4,
         hit_streak_required=5,
         velocity_decay=0.5,
-        edge_margin=100,
+        edge_margin=50,
         next_id_counter=1,
+        max_color_distance=90.0,
+        iou_suppresion_thresh=0.3
     ):
         # Confirmed tracks, keyed by object ID with detection info dicts
         self.tracked_objects = OrderedDict() # Mapping object ids to detection info dicts
@@ -30,8 +33,11 @@ class CentroidTracker:
 
 
         self.max_distance_ratio  = max_distance_ratio # Max distance from last centroid to consider a match, ratio of frame width
+        self.tight_distance_ratio = tight_distance_ratio
+        self.max_color_distance = max_color_distance
         self.hit_streak_required = hit_streak_required # Consecutive matches required to append tentative match to confirmed tracks
         self.max_disappeared_frames = max_disappeared  # max_disappeared: frames a confirmed track can go unmatched before deregistration
+        self.iou_suppresion_thresh = iou_suppresion_thresh
         self.velocity_decay = velocity_decay # Per frame decay factor for velocity to prevent drift during occlusion, 0.5 means velocity halves each unmatched frame
         self.edge_margin = edge_margin # Margin in pixels where velocity influence is reduced to cleanly stop tracking
         self.next_id_counter = next_id_counter # Incrementing id counter to give each object a unique ID
@@ -53,8 +59,8 @@ class CentroidTracker:
         :return: dict of confirmed tracked objects with their detection info
         """
         max_distance = frame_width * self.max_distance_ratio
-        max_color_distance = 20.0
-
+        tight_distance = frame_width * self.tight_distance_ratio
+        
         if not current_detections_info: # If there are no detections, age all confirmed and tentative tracks and return
             self._age_confirmed(set())
             self._age_tentative(set())
@@ -78,12 +84,20 @@ class CentroidTracker:
             matched_detection_cols = set()
 
             for row, col in zip(rows, cols):
+                logging.debug(f"{row}, {col}")
+                object_id = confirmed_ids[row]
                 if row in matched_confirmed_rows or col in matched_detection_cols: # when a match has already been made, skip
                     continue
-                if distance[row, col] > max_distance: # if the closest match is too far, skip
-                    continue
-                if self._calculate_color_distance > max_color_distance: # if closest match isn't close in color, skip
-                    continue
+                
+                is_within_tight_distance = distance[row, col] <= tight_distance
+                is_within_max_distance = distance[row, col] <= max_distance
+                is_similar_color = self._calculate_color_distance(object_id, current_detections_info[col]) <= self.max_color_distance
+                
+                if not is_within_tight_distance:
+                    if not is_within_max_distance:
+                        continue
+                    elif not is_similar_color:
+                        continue
                 
                 # if the color and distance are within the prediciton threshold, we consider a match and update
                 # FIXME - this assumes constant velocity between frames, which is not always the case
@@ -98,10 +112,22 @@ class CentroidTracker:
 
         else:
             self._age_confirmed(set())
-
+            
+        filtered_unmatched = set()
+        for col in unmatched_detection_cols:
+            det_bbox = current_detections_info[col]['bbox']
+            overlaps_confirmed = any(
+                self._compute_iou(det_bbox, self.tracked_objects[object_id]['bbox']) > self.iou_suppresion_thresh
+                for object_id in self.tracked_objects
+            )
+            if not overlaps_confirmed:
+                filtered_unmatched.add(col)
+        
+        unmatched_detection_cols = filtered_unmatched
+            
         # Second pass, match remaining detections against tentative tracks without velocity since they are not confirmed yet
-        still_unmatched_cols = set(unmatched_detection_cols)
-
+        still_unmatched_cols = filtered_unmatched
+        
         if self._tentative_objects and unmatched_detection_cols: # Try to match if tentative tracks exist and unmatched detections remain
             tent_ids       = list(self._tentative_objects.keys())
             tent_centroids = np.array([
@@ -197,7 +223,21 @@ class CentroidTracker:
         prev_color = self.colors[object_id]
         
         return np.linalg.norm(np.array(input_color) - np.array(prev_color))
+    
+    def _compute_iou(self, bbox1, bbox2):
+        x1 = max(bbox1[0], bbox2[0])
+        y1 = max(bbox1[1], bbox2[1])
+        x2 = min(bbox1[2], bbox2[2])
+        y2 = min(bbox1[3], bbox2[3])
         
+        intersection = max(0, x2 - x1) * max(0, y2 - y1)
+        if intersection == 0:
+            return 0.0
+        
+        area1 = (bbox1[2] - bbox1[0]) * (bbox1[3] - bbox1[1])
+        area2 = (bbox2[2] - bbox2[0]) * (bbox2[3] - bbox2[1])
+        union = area1 + area2 - intersection
+        return intersection / union if union > 0 else 0.0
 
     def _update_confirmed_track(self, object_id, detection_info):
         """
@@ -274,8 +314,9 @@ class CentroidTracker:
         new_id = self._get_next_id()
         self.tracked_objects[new_id]    = detection_info
         self.disappeared_frames[new_id] = 0 # Start with zero disappeared frames since it's just been confirmed
+        self.colors[new_id] = detection_info.get('color', (0,0,0))
        
-        logging.info(f"Track ID {new_id} confirmed after {self.hit_streak_required} consecutive matches.")
+        logging.debug(f"Track ID {new_id} confirmed after {self.hit_streak_required} consecutive matches.")
 
     def _get_next_id(self): # Get the next unique ID for a new confirmed track
         new_id = self.next_id_counter
@@ -283,7 +324,8 @@ class CentroidTracker:
         return new_id
 
     def _deregister(self, object_id): # Remove a track that has disappeared for too long
-        logging.info(f"Track ID {object_id} deregistered after {self.disappeared_frames[object_id]} missed frames.")
+        logging.debug(f"Track ID {object_id} deregistered after {self.disappeared_frames[object_id]} missed frames.")
         del self.tracked_objects[object_id]
         del self.disappeared_frames[object_id]
         self.velocities.pop(object_id, None)
+        self.colors.pop(object_id, None)

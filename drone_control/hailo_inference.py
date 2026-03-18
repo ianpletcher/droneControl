@@ -73,7 +73,7 @@ def find_best_model():
 def on_new_hailo_sample(appsink, app_state): 
     app_state.frame_count = getattr(app_state, 'frame_count', 0) + 1
     if app_state.frame_count % 120 == 0:
-        logging.info(f"Processing frame {app_state.frame_count}...", flush=True)   
+        logging.info(f"Processing frame {app_state.frame_count}...")   
     
     sample = appsink.emit('pull-sample') # Frame from gStreamer pipeline with Hailo metadata
     if not sample:
@@ -84,14 +84,16 @@ def on_new_hailo_sample(appsink, app_state):
         return Gst.FlowReturn.OK
     
     caps = sample.get_caps()
-    width = caps.get_structure(0).get_value('width')
-    height = caps.get_structure(0).get_value('height')
+    structure = caps.get_structure(0)._StructureWrapper__structure
+    
+    width = structure.get_int('width')[1]
+    height = structure.get_int('height')[1]
     
     net_w, net_h = 1280, 720
     
     result, map_info = buffer.map(Gst.MapFlags.READ)
     if result: 
-        frame = np.frombuffer(map_info.data, dtype=uint8)
+        frame = np.frombuffer(map_info.data, dtype=np.uint8)
         frame = frame.reshape((height, width, 3))
         
     
@@ -131,6 +133,14 @@ def on_new_hailo_sample(appsink, app_state):
             xmax_ai = int(bbox_raw.xmax() * ai_w)
             ymax_ai = int(bbox_raw.ymax() * ai_h)
             
+            centroid_ai = (int((xmin_ai + xmax_ai) / 2.0), int((ymin_ai + ymax_ai) / 2.0))
+            cx_ai = np.clip(centroid_ai[0], 0, ai_w - 1)
+            cy_ai = np.clip(centroid_ai[1], 0, ai_h - 1)
+            
+            patch = frame[max(0, cy_ai - 3):cy_ai + 4, max(0, cx_ai -3): cx_ai +4]
+            color = patch.mean(axis=(0,1))
+            
+            
             # Normalized cords for Network stream
             xmin = int(xmin_ai * scale_x)
             ymin = int(ymin_ai * scale_y)
@@ -154,7 +164,7 @@ def on_new_hailo_sample(appsink, app_state):
                 'centroid': centroid, 
                 'label': det.get_label(), # comes from object_labels list
                 'confidence': det.get_confidence(),
-                'color' : frame[centroid] #
+                'color' : color
             })
 
     except Exception as e:
@@ -201,13 +211,13 @@ def on_new_hailo_sample(appsink, app_state):
 
             data_to_send.append(item)
 
-            app_state.seq += 1
-            # Build the telemetry envelope
-            wrapper = {
-                'seq':       app_state.seq,
-                'timestamp': time.time(),
-                'objects':   data_to_send,
-            }
+        app_state.seq += 1
+        # Build the telemetry envelope
+        wrapper = {
+            'seq':       app_state.seq,
+            'timestamp': time.time(),
+            'objects':   data_to_send,
+        }
     
         # Serialise and send (auto-fragmented to stay within MTU)
         msgpack_data = msgpack.packb(wrapper, use_bin_type=True)
