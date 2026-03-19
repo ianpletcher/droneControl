@@ -185,8 +185,9 @@ def on_new_hailo_sample(appsink, app_state):
         with app_state.tracker_lock:
             tracked_objects = app_state.tracker.update_target()
             snapshot = tracked_objects.copy()
-        
 
+    # FIXME: Move to a new function and call on input data, allowing use on single object or list of objects
+    
     try:
         # Sending to serializer
         # Ensure all values are native Python types (no numpy types) so msgpack
