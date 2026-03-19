@@ -42,7 +42,7 @@ class CentroidTracker:
         self.edge_margin = edge_margin # Margin in pixels where velocity influence is reduced to cleanly stop tracking
         self.next_id_counter = next_id_counter # Incrementing id counter to give each object a unique ID
 
-    def update(self, current_detections_info, frame_width, frame_height):
+    def update_all_detections(self, current_detections_info, frame_width, frame_height):
         """
         Main update step. Call once per frame with all filtered detections.
 
@@ -182,8 +182,53 @@ class CentroidTracker:
             self._register_tentative(current_detections_info[col])
 
         return self.tracked_objects
-
     
+    def update_target(self, current_detections_info, target_id, frame_width, frame_height):
+        """
+        Update target detection only. Call once per frame while tracking.
+        Called when tracking for lighter computation overhead rather than determining matches
+        of every detection within the frame.
+        
+        """
+        
+        max_distance = frame_width * self.max_distance_ratio
+        tight_distance = frame_width * self.tight_distance_ratio
+        
+        if target_id not in self.tracked_objects.keys():
+            logging.info(f"Target {target_id} not found")
+            return self.tracked_objects
+        
+        #Single-object predicted centroid computation
+        input_centroids = np.array(d['centroid'] for d in current_detections_info)
+        cx, cy = self.tracked_objects[target_id]['centroid']
+        vx, vy = self.velocities_get(target_id, (0,0))
+        
+        edge_proximity  = min(cx, frame_width - cx, cy, frame_height - cy) # Distance to nearest edge of the frame
+        velocity_weight = float(np.clip(edge_proximity / self.edge_margin, 0.0, 1.0))
+        
+        px = int(np.clip(cx + vx * velocity_weight, 0, frame_width - 1))  
+        py = int(np.clip(cy + vy * velocity_weight, 0, frame_height - 1))
+        
+        predicted_centroid = np.array([[px, py]])
+        
+        distance = cdist(predicted_centroid, input_centroids)
+        
+        # Match testing with each current detection
+        
+        distance_detections = zip(distance[0], current_detections_info)
+        
+        for distance, detection in distance_detections:
+            if distance > max_distance: # if detection distance is greater than max, skip
+                continue
+            # If detection distance is within max, it must either be within tight distance or have similar color
+            if distance > tight_distance or self._calculate_color_distance(target_id, detection['color']) > self.max_color_distance:
+                continue
+            
+            self._update_confirmed_track(target_id, detection)
+        
+        return self.tracked_objects[target_id]
+             
+              
     def _build_predicted_centroids(self, object_ids, frame_width, frame_height):
         """
         Build velocity-predicted centroids for confirmed object IDs.

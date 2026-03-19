@@ -169,16 +169,25 @@ def on_new_hailo_sample(appsink, app_state):
 
     except Exception as e:
         logging.error(f"Error processing Hailo detections: {e}")
-
+        
+    with app_state.target_lock:
+        current_target_id = app_state.target_id
+        
     # Gathering data to serialize and send to ground station
-    with app_state.tracker_lock:
-        tracked_objects = app_state.tracker.update(current_detections_info, net_w, net_h)
-        snapshot = tracked_objects.copy()  # cheap shallow snapshot of mapping
+    if not current_target_id: # if not tracking, update and display all detections within frame
+        logging.info("No target selected, sending all detections.")
+        with app_state.tracker_lock:
+            tracked_objects = app_state.tracker.update_all_detections(current_detections_info, net_w, net_h)
+            snapshot = tracked_objects.copy()  # cheap shallow snapshot of mapping
+    
+    else: # if tracking, save computation overhead by updating and displaying only target
+        logging.info(f"Tracking id {app_state.target_id}, sending only target detection")
+        with app_state.tracker_lock:
+            tracked_objects = app_state.tracker.update_target()
+            snapshot = tracked_objects.copy()
+        
 
     try:
-        with app_state.target_lock:
-            current_target_id = app_state.target_id
-
         # Sending to serializer
         # Ensure all values are native Python types (no numpy types) so msgpack
         # serialization is robust on the receiver side. Explicitly coerce fields.

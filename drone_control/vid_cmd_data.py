@@ -147,13 +147,12 @@ def run_command_server(app_state):
                                 if new_target_id is not None:
                                     if app_state.drone_state == "MANUAL":
                                         app_state.drone_state = "TRACKING"
-                                        print(f"\n[MANUAL] → TRACKING: Target ID {new_target_id} selected.")
-                                    else:
-                                        app_state.drone_state = "TRACKING"
+                                        logging.info(f"\n[MANUAL] → TRACKING: Target ID {new_target_id} selected.")
+                                    elif app_state.drone_state == "TRACKING":
                                         print(f"\n[TRACKING] Target switched to ID {new_target_id}.")
                                 else:
                                     app_state.drone_state = "MANUAL"
-                                    print("\nTarget cleared by operator. Returning to MANUAL.")
+                                    logging.info(f"\nTarget cleared by operator. Returning to MANUAL.")
                     else:
                         logging.info("Received empty command.")
             except socket.timeout:
