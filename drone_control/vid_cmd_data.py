@@ -11,6 +11,7 @@ import os
 import asyncio
 import logging
 from mavsdk import System
+from mavsdk.offboard import OffboardError, VelocityBodyYawspeed
 from pymavlink import mavutil
 
 logging.basicConfig(level=logging.INFO)
@@ -23,11 +24,6 @@ def load_config(path=None):
         import tomllib as _toml
         with open(path, "rb") as f:
             return _toml.load(f)
-    except Exception:
-        try:
-            import tomllib as _toml
-            with open(path, "rb") as f:
-                return _toml.load(f)
         except Exception:
             return {}
 
@@ -36,7 +32,9 @@ _NET = _CFG.get("network", {})
 GROUND_STATION_IP = _NET.get("ground_ip", "10.5.0.1")
 VIDEO_STREAM_PORT = int(_NET.get("video_port", 5602))
 DATA_PORT = int(_NET.get("data_port", 5601))
-COMMAND_PORT = int(_NET.get("command_port", 5603))      
+COMMAND_PORT = int(_NET.get("command_port", 5603))
+DRONE_SYSTEM_ADDRESS = _NET.get("drone_system_address", "serial:///dev/ttyAMA0:57600")
+
 
 # -----------------------------------------------------------------------------------------------
 # GStreamer Thread
@@ -142,9 +140,8 @@ def run_command_server(app_state):
                             new_target_id = command['target_id']
                             with app_state.target_lock:
                                 app_state.target_id = new_target_id
-
-                            with app_state.drone_state_lock:
-                                if new_target_id is not None:
+                                with app_state.drone_state_lock:
+                                    if new_target_id is not None:
                                     if app_state.drone_state == "MANUAL":
                                         app_state.drone_state = "TRACKING"
                                         print(f"\n[MANUAL] → TRACKING: Target ID {new_target_id} selected.")
@@ -172,13 +169,15 @@ TARGET_LOST_HOVER_TIMEOUT = 5.0
 HOLD_BEFORE_MANUAL_DURATION = 2.0
 STATE_CYCLE_INTERVAL = 0.1
 
-
+def run_drone_control(app_state, drone_controller):
+    asyncio.run(run_drone_control_async(app_state, drone_controller))
 
 
 async def run_drone_control_async(app_state, drone_controller, bbox=None):
         
     drone = System()   #used SERIAL_PORT before, now 
-    print(f"Connecting to drone on {COMMAND_PORT}...")
+    print(f"Connecting to drone via MAVLink on {DRONE_SYSTEM_ADDRESS}...")
+
 
     try:
         await drone.connect(system_address=COMMAND_PORT)
@@ -195,13 +194,13 @@ async def run_drone_control_async(app_state, drone_controller, bbox=None):
                 break
 
         print("Starting in MANUAL mode. Click a target to engage autonomous tracking.")
+        await drone.offboard.set_velocity_body(VelocityBodyYawspeed(0.0, 0.0, 0.0, 0.0))
+        offboard_active = False
 
-        #hover_lost_time = None 
-        #hold_start_time = None
 
         last_command_str = None
 
-        while not app_state.mavsdk_stop_event.is_set():
+       while not app_state.control_loop_stop_event.is_set():
             try:
                 with app_state.drone_state_lock: # current state not implemented correctly
                     current_state = app_state.drone_state
@@ -219,31 +218,63 @@ async def run_drone_control_async(app_state, drone_controller, bbox=None):
                         target_data = app_state.tracker.tracked_objects.get(target_id)
                         if target_data:
                             target_bbox = target_data['bbox']
-                # logic might not be correct on drone_controller implementation, need to make sure it can handle target_bbox being None and not send erratic commands.
+
+                if current_state == "MANUAL":
+                    if offboard_active:
+                        try:
+                            await drone.offboard.stop()
+                            offboard_active = False
+                            print("Offboard stopped — MANUAL mode.")
+                        except OffboardError as e:
+                            print(f"Failed to stop offboard: {e}")
+                    await asyncio.sleep(STATE_CYCLE_INTERVAL)
+                    continue
+                
                 forward_velocity, up_velocity, yaw_velocity, command_str = drone_controller.compute_command(
-                    target_bbox, frame_w, frame_h
+                    target_bbox, frame_w, frame_h )
+               
+                with app_state.drone_state_lock:
+                    app_state.forward_velocity = forward_velocity
+                    app_state.up_velocity      = up_velocity
+                    app_state.yaw_velocity     = yaw_velocity
+ 
+             
+                if not offboard_active:
+                    try:
+                        await drone.offboard.start()
+                        offboard_active = True
+                        print("Offboard started — TRACKING mode.")
+                    except OffboardError as e:
+                        print(f"Failed to start offboard: {e}")
+                        await asyncio.sleep(STATE_CYCLE_INTERVAL)
+                        continue
+ 
+                await drone.offboard.set_velocity_body(
+                    VelocityBodyYawspeed(forward_velocity, 0.0, -up_velocity, yaw_velocity)
                 )
-                async with asyncio.Lock():
-                    app_state.forward_velocity = forward_velocity                        
-                    app_state.up_velocity = up_velocity
-                    app_state.yaw_velocity = yaw_velocity
-                print(f"Async Control Loop: {command_str}")
-                await asyncio.sleep(0.1)
+ 
                 if command_str != last_command_str:
                     print(f"{command_str}", end='\r')
                     last_command_str = command_str
-
+ 
+                await asyncio.sleep(STATE_CYCLE_INTERVAL)
+ 
             except Exception as e:
-                if not app_state.mavsdk_stop_event.is_set():
+                if not app_state.control_loop_stop_event.is_set():
                     print(f"Error in control loop: {e}")
-                    await asyncio.sleep(0.1)
-
+                    await asyncio.sleep(STATE_CYCLE_INTERVAL)
+ 
     except Exception as e:
         print(f"Drone connection/setup error: {e}")
-
+ 
     finally:
+        print("Drone control loop shutting down...")
+        if offboard_active:
+            try:
+                await drone.offboard.stop()
+            except Exception:
+                pass
         try:
             await drone.disconnect()
-        except Exception as disconnect_error:
-            print(f"Error during drone disconnect: {disconnect_error}")
-            # target_bbox = None            
+        except Exception as e:
+            print(f"Error during drone disconnect: {e}")
