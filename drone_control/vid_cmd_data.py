@@ -24,8 +24,8 @@ def load_config(path=None):
         import tomllib as _toml
         with open(path, "rb") as f:
             return _toml.load(f)
-        except Exception:
-            return {}
+    except Exception:
+        return {}
 
 _CFG = load_config()
 _NET = _CFG.get("network", {})
@@ -142,17 +142,17 @@ def run_command_server(app_state):
                                 app_state.target_id = new_target_id
                                 with app_state.drone_state_lock:
                                     if new_target_id is not None:
-                                    if app_state.drone_state == "MANUAL":
-                                        app_state.drone_state = "TRACKING"
-                                        print(f"\n[MANUAL] → TRACKING: Target ID {new_target_id} selected.")
+                                        if app_state.drone_state == "MANUAL":
+                                            app_state.drone_state = "TRACKING"
+                                            print(f"\n[MANUAL] → TRACKING: Target ID {new_target_id} selected.")
+                                        else:
+                                            app_state.drone_state = "TRACKING"
+                                            print(f"\n[TRACKING] Target switched to ID {new_target_id}.")
                                     else:
-                                        app_state.drone_state = "TRACKING"
-                                        print(f"\n[TRACKING] Target switched to ID {new_target_id}.")
-                                else:
-                                    app_state.drone_state = "MANUAL"
-                                    print("\nTarget cleared by operator. Returning to MANUAL.")
-                    else:
-                        logging.info("Received empty command.")
+                                        app_state.drone_state = "MANUAL"
+                                        print("\nTarget cleared by operator. Returning to MANUAL.")
+                        else:
+                            logging.info("Received empty command.")
             except socket.timeout:
                 continue
             except json.JSONDecodeError:
@@ -180,7 +180,7 @@ async def run_drone_control_async(app_state, drone_controller, bbox=None):
 
 
     try:
-        await drone.connect(system_address=COMMAND_PORT)
+        await drone.connect(system_address=DRONE_SYSTEM_ADDRESS)
 
         async for state in drone.core.connection_state():
             if state.is_connected:
@@ -200,7 +200,7 @@ async def run_drone_control_async(app_state, drone_controller, bbox=None):
 
         last_command_str = None
 
-       while not app_state.control_loop_stop_event.is_set():
+         while not app_state.control_loop_stop_event.is_set():
             try:
                 with app_state.drone_state_lock: # current state not implemented correctly
                     current_state = app_state.drone_state
