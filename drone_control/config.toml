@@ -7,6 +7,7 @@ ground_ip_gadget = "10.55.0.1"
 video_port = 5602
 data_port = 5601
 command_port = 5603
+drone_system_address = "" #MUST BE CHANGED TO PC PORT
 use_multicast = false
 multicast_group = "239.255.0.1"
 # Check what the code currently uses in this regard #
