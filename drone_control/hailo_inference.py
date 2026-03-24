@@ -8,11 +8,12 @@ import logging
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst
+import numpy as np
 
 from vid_cmd_data import send_telemetry_udp, GROUND_STATION_IP, DATA_PORT
 
 MIN_CONFIDENCE = 0.35
-MIN_BBOX_AREA = 1000
+MIN_BBOX_AREA = 600
 
 script_dir = Path(__file__).parent
 
@@ -82,13 +83,23 @@ def on_new_hailo_sample(appsink, app_state):
     if not buffer:
         return Gst.FlowReturn.OK
     
-    #FIXME 
-
-    #extract data from frame
-    """ caps = sample.get_caps()
-    structure = caps.get_structure(0) """
+    caps = sample.get_caps()
+    structure = caps.get_structure(0)._StructureWrapper__structure
+    
+    width = structure.get_int('width')[1]
+    height = structure.get_int('height')[1]
     
     net_w, net_h = 1280, 720
+    
+    result, map_info = buffer.map(Gst.MapFlags.READ)
+    if result: 
+        frame = np.frombuffer(map_info.data, dtype=np.uint8)
+        frame = frame.reshape((height, width, 3)).copy()
+        buffer.unmap(map_info)
+    else :
+        logging.error("Failed to map buffer")
+        return Gst.FlowReturn.OK
+        
     
     with app_state.frame_size_lock:
         if app_state.frame_width != net_w or app_state.frame_height != net_h:
@@ -126,6 +137,14 @@ def on_new_hailo_sample(appsink, app_state):
             xmax_ai = int(bbox_raw.xmax() * ai_w)
             ymax_ai = int(bbox_raw.ymax() * ai_h)
             
+            centroid_ai = (int((xmin_ai + xmax_ai) / 2.0), int((ymin_ai + ymax_ai) / 2.0))
+            cx_ai = np.clip(centroid_ai[0], 0, ai_w - 1)
+            cy_ai = np.clip(centroid_ai[1], 0, ai_h - 1)
+            
+            patch = frame[max(0, cy_ai - 3):cy_ai + 4, max(0, cx_ai -3): cx_ai +4]
+            color = patch.mean(axis=(0,1))
+            
+            
             # Normalized cords for Network stream
             xmin = int(xmin_ai * scale_x)
             ymin = int(ymin_ai * scale_y)
@@ -141,26 +160,39 @@ def on_new_hailo_sample(appsink, app_state):
                 continue
             if ymin < EDGE_EXCLUSION_MARGIN or ymax > (net_h - EDGE_EXCLUSION_MARGIN):
                 continue
-
+            
+            centroid = (int((xmin + xmax) / 2.0), int((ymin + ymax) / 2.0)) #centroid of detection
+            
             current_detections_info.append({
                 'bbox': (xmin, ymin, xmax, ymax),
-                'centroid': (int((xmin + xmax) / 2.0), int((ymin + ymax) / 2.0)), 
-                'label': det.get_label(), #comes from object_labels list
-                'confidence': det.get_confidence()
+                'centroid': centroid, 
+                'label': det.get_label(), # comes from object_labels list
+                'confidence': det.get_confidence(),
+                'color' : color
             })
 
     except Exception as e:
         logging.error(f"Error processing Hailo detections: {e}")
-
+        
+    with app_state.target_lock:
+        current_target_id = app_state.target_id
+        
     # Gathering data to serialize and send to ground station
-    with app_state.tracker_lock:
-        tracked_objects = app_state.tracker.update(current_detections_info, net_w, net_h)
-        snapshot = tracked_objects.copy()  # cheap shallow snapshot of mapping
+    if not current_target_id: # if not tracking, update and display all detections within frame
+        logging.debug("No target selected, sending all detections.")
+        with app_state.tracker_lock:
+            tracked_objects = app_state.tracker.update_all_detections(current_detections_info, net_w, net_h)
+            snapshot = tracked_objects.copy()  # cheap shallow snapshot of mapping
+    
+    else: # if tracking, save computation overhead by updating and displaying only target
+        logging.debug(f"Tracking id {app_state.target_id}, sending only target detection")
+        with app_state.tracker_lock:
+            tracked_objects = app_state.tracker.update_target(current_detections_info, current_target_id, net_w, net_h)
+            snapshot = {current_target_id : tracked_objects}
+
+    # FIXME: Move to a new function and call on input data, allowing use on single object or list of objects
 
     try:
-        with app_state.target_lock:
-            current_target_id = app_state.target_id
-
         # Sending to serializer
         # Ensure all values are native Python types (no numpy types) so msgpack
         # serialization is robust on the receiver side. Explicitly coerce fields.

@@ -4,6 +4,7 @@ import time
 import json
 import os
 import msgpack
+import logging
 
 # Load configuration from `config.toml` (repo root) if available.
 def load_config(path=None):
@@ -66,7 +67,7 @@ def run_data_receiver(app_state):
         s.setsockopt(socket.SOL_SOCKET, socket.SO_REUSEADDR, 1)
         s.bind(('', DATA_PORT))
         s.settimeout(1.0)   # allows the stop-event check on every timeout
-        print(f"Data receiver listening on port {DATA_PORT}")
+        logging.info(f"Data receiver listening on port {DATA_PORT}")
 
         while not app_state.data_thread_stop_event.is_set():
             try:
@@ -107,7 +108,7 @@ def run_data_receiver(app_state):
                             app_state.tracking_data = tracking_list
                         last_processed_seq = seq
                     except Exception as e:
-                        print(f"Failed to decode telemetry: {e}", end='\r')
+                        logging.error(f"Failed to decode telemetry: {e}", end='\r')
                     del reassembly[seq]
 
                 # ── Drop timed-out incomplete messages ────────────────────────
@@ -124,7 +125,7 @@ def run_data_receiver(app_state):
                 continue   # normal timeout, loop again
             except Exception as e:
                 if not app_state.data_thread_stop_event.is_set():
-                    print(f"Data receiver error: {e}")
+                    logging.error(f"Data receiver error: {e}")
                     time.sleep(1)
 
 # -----------------------------------------------------------------------------------------------
@@ -141,11 +142,11 @@ def send_command_to_air_pi(command_dict):
             s.connect((RADXA_GADGET_IP, COMMAND_PORT))
             command_json = json.dumps(command_dict)
             s.sendall(command_json.encode('utf-8'))
-            print(f"Sent command to Air Pi: {command_json}")
+            logging.info(f"Sent command to Air Pi: {command_json}")
     except socket.timeout:
-        print(f"Error: Connection to Air Pi command server timed out.")
+        logging.error(f"Error: Connection to Air Pi command server timed out.")
     except ConnectionRefusedError:
-        print(f"Error: Connection to Air Pi command server refused.")
+        logging.error(f"Error: Connection to Air Pi command server refused.")
     except Exception as e:
-        print(f"Error sending command: {e}")
+        logging.error(f"Error sending command: {e}")
 

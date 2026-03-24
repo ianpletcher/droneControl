@@ -7,6 +7,7 @@ import sys
 import platform
 import pygame #rendering UI
 import threading
+import logging
 
 from app_state import AppState
 from data_cmd import VIDEO_STREAM_PORT, DATA_PORT, COMMAND_PORT, RADXA_GADGET_IP
@@ -23,12 +24,12 @@ def main():
     Gst.init(None)
     main_loop = GLib.MainLoop()
    
-    print("Initializing ground station...")
-    print("Initializing ground station...")
-    print(f"Expecting Radxa USB gadget at: {RADXA_GADGET_IP}")
-    print(f"Video  : UDP :{VIDEO_STREAM_PORT}")
-    print(f"Data   : UDP :{DATA_PORT}")
-    print(f"Command: TCP :{COMMAND_PORT}")
+    logging.info("Initializing ground station...")
+    logging.info("Initializing ground station...")
+    logging.info(f"Expecting Radxa USB gadget at: {RADXA_GADGET_IP}")
+    logging.info(f"Video  : UDP :{VIDEO_STREAM_PORT}")
+    logging.info(f"Data   : UDP :{DATA_PORT}")
+    logging.info(f"Command: TCP :{COMMAND_PORT}")
    
     app_state = AppState()
    
@@ -51,6 +52,10 @@ def main():
    
     # Initialize pygame
     pygame.init()
+    if not pygame.get_init():
+        logging.error("Failed to initialize Pygame.")
+        sys.exit(1)
+    logging.info("Pygame initialized successfully.")
     # Default size, will be resized on first frame
     screen = pygame.display.set_mode((1280, 720), pygame.RESIZABLE)
     pygame.display.set_caption("Ground Station")
@@ -62,14 +67,14 @@ def main():
    
     ui_state = { 'running': True }
    
-    print("Ground station ready. Waiting for video feed...")
+    logging.info("Ground station ready. Waiting for video feed...")
    
     # Main loop (Pygame UI)
     try:
         while ui_state['running']:
             # Check for GStreamer errors
             if app_state.gst_error_event.is_set():
-                print("GStreamer error detected, exiting...")
+                logging.error("GStreamer error detected, exiting...")
                 break
            
             # Get local copies of shared data (thread-safe)
@@ -97,25 +102,25 @@ def main():
             clock.tick(60) # Limit UI framerate
            
     except KeyboardInterrupt:
-        print("\nShutdown requested by user (Ctrl+C)...")
+        logging.info("\nShutdown requested by user (Ctrl+C)...")
        
     finally:
-        print("Shutting down...")
+        logging.info("Shutting down...")
        
         # Stop threads
         app_state.gst_error_event.set()
         app_state.data_thread_stop_event.set()
        
         if main_loop.is_running():
-            print("Quitting GLib main loop...")
+            logging.info("Quitting GLib main loop...")
             main_loop.quit()
        
-        print("Waiting for threads to join...")
+        logging.info("Waiting for threads to join...")
         gst_thread.join(timeout=3)
         data_thread.join(timeout=2)
        
         pygame.quit()
-        print("Ground station stopped")
+        logging.info("Ground station stopped")
         sys.exit(0)
 
 if __name__ == "__main__":

@@ -140,19 +140,19 @@ def run_command_server(app_state):
                             new_target_id = command['target_id']
                             with app_state.target_lock:
                                 app_state.target_id = new_target_id
-                                with app_state.drone_state_lock:
-                                    if new_target_id is not None:
-                                        if app_state.drone_state == "MANUAL":
-                                            app_state.drone_state = "TRACKING"
-                                            print(f"\n[MANUAL] → TRACKING: Target ID {new_target_id} selected.")
-                                        else:
-                                            app_state.drone_state = "TRACKING"
-                                            print(f"\n[TRACKING] Target switched to ID {new_target_id}.")
-                                    else:
-                                        app_state.drone_state = "MANUAL"
-                                        print("\nTarget cleared by operator. Returning to MANUAL.")
-                        else:
-                            logging.info("Received empty command.")
+
+                            with app_state.drone_state_lock:
+                                if new_target_id is not None:
+                                    if app_state.drone_state == "MANUAL":
+                                        app_state.drone_state = "TRACKING"
+                                        logging.info(f"\n[MANUAL] → TRACKING: Target ID {new_target_id} selected.")
+                                    elif app_state.drone_state == "TRACKING":
+                                        print(f"\n[TRACKING] Target switched to ID {new_target_id}.")
+                                else:
+                                    app_state.drone_state = "MANUAL"
+                                    logging.info(f"\nTarget cleared by operator. Returning to MANUAL.")
+                    else:
+                        logging.info("Received empty command.")
             except socket.timeout:
                 continue
             except json.JSONDecodeError:

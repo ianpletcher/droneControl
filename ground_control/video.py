@@ -3,6 +3,7 @@ import threading
 import gi
 gi.require_version('Gst', '1.0')
 from gi.repository import Gst, GLib
+import logging
 
 from data_cmd import VIDEO_STREAM_PORT
 
@@ -55,18 +56,18 @@ def run_gstreamer_receiver(app_state, main_loop):
             t = message.type
             if t == Gst.MessageType.ERROR:
                 err, debug = message.parse_error()
-                print(f"GStreamer ERROR: {err}, {debug}")
+                logging.error(f"GStreamer ERROR: {err}, {debug}")
                 app_state.gst_error_event.set()
                 main_loop.quit()
             elif t == Gst.MessageType.WARNING:
                 err, debug = message.parse_warning()
-                print(f"GStreamer WARNING: {err}, {debug}")
+                logging.warning(f"GStreamer WARNING: {err}, {debug}")
         
         bus.connect("message", on_message)
 
         appsink = pipeline.get_by_name("appsink")
         if not appsink:
-            print("ERROR: Could not find 'appsink' element in pipeline.")
+            logging.error("ERROR: Could not find 'appsink' element in pipeline.")
             raise RuntimeError("Missing appsink element")
            
         # Connect our callback
@@ -75,15 +76,15 @@ def run_gstreamer_receiver(app_state, main_loop):
        
         # Set pipeline to PLAYING
         pipeline.set_state(Gst.State.PLAYING)
-        print("GStreamer receiver pipeline is running...")
+        logging.info("GStreamer receiver pipeline is running...")
        
         # Run the GLib main loop
         main_loop.run()
        
     except Exception as e:
-        print(f"GStreamer error: {e}")
+        logging.error(f"GStreamer error: {e}")
     finally:
-        print("GStreamer thread stopping...")
+        logging.info("GStreamer thread stopping...")
         if pipeline:
             pipeline.set_state(Gst.State.NULL)
         app_state.gst_error_event.set()
@@ -125,7 +126,7 @@ def on_new_video_sample(appsink, app_state):
                 app_state.pygame_frame = numpy_frame.copy()
                
     except Exception as e:
-        print(f"Error processing video frame: {e}")
+        logging.error(f"Error processing video frame: {e}")
     finally:
         buffer.unmap(map_info)
        
