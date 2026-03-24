@@ -1,4 +1,5 @@
 import pygame
+import logging
 
 from data_cmd import send_command_to_air_pi
 
@@ -17,6 +18,7 @@ def select_target_by_click(click_pos, tracking_data, app_state):
         # If the click position is within the bounding box, we have found a target
         if (start_x) < click_pos[0] < (end_x) and (start_y) < click_pos[1] < (end_y):
             new_target_id = data['id']
+            logging.debug(f"Click at {click_pos} matched target ID {new_target_id} with bbox {data['bbox']}")
             found_target = True
             break
            
@@ -24,9 +26,9 @@ def select_target_by_click(click_pos, tracking_data, app_state):
         app_state.current_target_id = new_target_id
        
     if found_target:
-        print(f"Clicked new target: ID {new_target_id}")
+        logging.info(f"Clicked new target: ID {new_target_id}")
     else:
-        print("Clicked empty space, clearing target.")
+        logging.info("Clicked empty space, clearing target.")
        
     # Not really sending directly to Air Pi, maybe change name?
     send_command_to_air_pi({'target_id': new_target_id})
@@ -48,7 +50,7 @@ def handle_input(events, ui_state, app_state, tracking_data):
         elif event.type == pygame.KEYDOWN:
             # Clear target
             if event.key == pygame.K_c:
-                print("Target cleared by 'C' key")
+                logging.info("Target cleared by 'C' key")
                 with app_state.target_lock:
                     app_state.current_target_id = None
                 send_command_to_air_pi({'target_id': None})
@@ -58,8 +60,13 @@ def handle_input(events, ui_state, app_state, tracking_data):
                 ui_state['running'] = False
 
 
-def render_graphics(screen, frame, tracking_data, current_target_id, ui_state, fonts):
+def render_graphics(screen, frame, tracking_data, current_target_id, ui_state,fonts):
     """Render frame with tracking overlays"""
+    
+    if not tracking_data:
+        logging.debug("No tracking data to render.")
+    else:
+        logging.debug(f"Rendering {len(tracking_data)} tracked objects. Current target ID: {current_target_id}")
    
     if frame is None:
         # Display "Waiting for video" message

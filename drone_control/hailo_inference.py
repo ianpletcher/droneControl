@@ -94,7 +94,7 @@ def on_new_hailo_sample(appsink, app_state):
     result, map_info = buffer.map(Gst.MapFlags.READ)
     if result: 
         frame = np.frombuffer(map_info.data, dtype=np.uint8)
-        frame = frame.reshape((height, width, 3))
+        frame = frame.reshape((height, width, 3)).copy()
         buffer.unmap(map_info)
     else :
         logging.error("Failed to map buffer")
@@ -102,10 +102,10 @@ def on_new_hailo_sample(appsink, app_state):
         
     
     with app_state.frame_size_lock:
-        if app_state.frame_width != width or app_state.frame_height != height:
-            app_state.frame_width = width
-            app_state.frame_height = height
-            logging.info(f"Detected frame size: {width}x{height}")
+        if app_state.frame_width != net_w or app_state.frame_height != net_h:
+            app_state.frame_width = net_w
+            app_state.frame_height = net_h
+            logging.info(f"Detected frame size: {net_w}x{net_h}")
 
 
     current_detections_info = [] 

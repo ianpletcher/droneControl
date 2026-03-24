@@ -14,7 +14,7 @@ class AppState:
             edge_margin=50,
             next_id_counter=1,
             max_color_distance = 90.0,
-            iou_suppresion_thresh=0.8
+            iou_suppresion_thresh=0.3
             )
         
         self.target_id = None

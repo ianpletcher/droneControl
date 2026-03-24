@@ -18,7 +18,7 @@ class CentroidTracker:
         edge_margin=50,
         next_id_counter=1,
         max_color_distance=90.0,
-        iou_suppresion_thresh=0.8 
+        iou_suppresion_thresh=0.3
     ):
         # Confirmed tracks, keyed by object ID with detection info dicts
         self.tracked_objects = OrderedDict() # Mapping object ids to detection info dicts
