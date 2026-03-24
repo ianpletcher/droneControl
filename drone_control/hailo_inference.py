@@ -72,7 +72,7 @@ def find_best_model():
 def on_new_hailo_sample(appsink, app_state): 
     app_state.frame_count = getattr(app_state, 'frame_count', 0) + 1
     if app_state.frame_count % 120 == 0:
-        logging.info(f"Processing frame {app_state.frame_count}...", flush=True)   
+        logging.info(f"Processing frame {app_state.frame_count}...")   
     
     sample = appsink.emit('pull-sample') # Frame from gStreamer pipeline with Hailo metadata
     if not sample:
@@ -193,13 +193,13 @@ def on_new_hailo_sample(appsink, app_state):
 
             data_to_send.append(item)
 
-            app_state.seq += 1
-            # Build the telemetry envelope
-            wrapper = {
-                'seq':       app_state.seq,
-                'timestamp': time.time(),
-                'objects':   data_to_send,
-            }
+        app_state.seq += 1
+        # Build the telemetry envelope
+        wrapper = {
+            'seq':       app_state.seq,
+            'timestamp': time.time(),
+            'objects':   data_to_send,
+        }
     
         # Serialise and send (auto-fragmented to stay within MTU)
         msgpack_data = msgpack.packb(wrapper, use_bin_type=True)

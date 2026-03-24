@@ -200,7 +200,7 @@ async def run_drone_control_async(app_state, drone_controller, bbox=None):
 
         last_command_str = None
 
-         while not app_state.control_loop_stop_event.is_set():
+        while not app_state.control_loop_stop_event.is_set():
             try:
                 with app_state.drone_state_lock: # current state not implemented correctly
                     current_state = app_state.drone_state
