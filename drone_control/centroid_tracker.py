@@ -18,7 +18,7 @@ class CentroidTracker:
         edge_margin=50,
         next_id_counter=1,
         max_color_distance=90.0,
-        iou_suppresion_thresh=0.3
+        iou_suppresion_thresh=0.8 
     ):
         # Confirmed tracks, keyed by object ID with detection info dicts
         self.tracked_objects = OrderedDict() # Mapping object ids to detection info dicts
@@ -114,7 +114,7 @@ class CentroidTracker:
             self._age_confirmed(set())
             
         filtered_unmatched = set()
-        for col in unmatched_detection_cols:
+        for col in unmatched_detection_cols: # Avoid registering unmatched detections that are duplicates of confirmed tracks by checking for overlap
             det_bbox = current_detections_info[col]['bbox']
             overlaps_confirmed = any(
                 self._compute_iou(det_bbox, self.tracked_objects[object_id]['bbox']) > self.iou_suppresion_thresh
@@ -150,7 +150,6 @@ class CentroidTracker:
                     continue
                 if tent_dist[row, col] > max_distance:
                     continue
-                
                 
                 # If a tentative track is close enough to a detection, consider it a hit
                 tent_id      = tent_ids[row]
@@ -190,18 +189,18 @@ class CentroidTracker:
         of every detection within the frame.
         
         """
+            
+        if target_id not in self.tracked_objects.keys():
+            logging.info(f"Target {target_id} not found")
+            return self.tracker.update_all_detections(current_detections_info, frame_width, frame_height)
         
         max_distance = frame_width * self.max_distance_ratio
         tight_distance = frame_width * self.tight_distance_ratio
         
-        if target_id not in self.tracked_objects.keys():
-            logging.info(f"Target {target_id} not found")
-            return self.tracked_objects
-        
         #Single-object predicted centroid computation
-        input_centroids = np.array(d['centroid'] for d in current_detections_info)
+        input_centroids = np.array([d['centroid'] for d in current_detections_info])
         cx, cy = self.tracked_objects[target_id]['centroid']
-        vx, vy = self.velocities_get(target_id, (0,0))
+        vx, vy = self.velocities.get(target_id, (0,0))
         
         edge_proximity  = min(cx, frame_width - cx, cy, frame_height - cy) # Distance to nearest edge of the frame
         velocity_weight = float(np.clip(edge_proximity / self.edge_margin, 0.0, 1.0))
@@ -217,14 +216,26 @@ class CentroidTracker:
         
         distance_detections = zip(distance[0], current_detections_info)
         
+        matched = False
+        
         for distance, detection in distance_detections:
             if distance > max_distance: # if detection distance is greater than max, skip
                 continue
             # If detection distance is within max, it must either be within tight distance or have similar color
-            if distance > tight_distance or self._calculate_color_distance(target_id, detection['color']) > self.max_color_distance:
+            if distance > tight_distance and self._calculate_color_distance(target_id, detection) > self.max_color_distance:
                 continue
             
+            matched = True
             self._update_confirmed_track(target_id, detection)
+            break
+        
+        if not matched:
+            self.disappeared_frames[target_id] += 1
+            if self.disappeared_frames[target_id] > self.max_disappeared_frames:
+                self._deregister(target_id)
+            else:
+                vx, vy = self.velocities.get(target_id, (0, 0))
+                self.velocities[target_id] = (vx * self.velocity_decay, vy * self.velocity_decay)
         
         return self.tracked_objects[target_id]
              
@@ -270,6 +281,14 @@ class CentroidTracker:
         return np.linalg.norm(np.array(input_color) - np.array(prev_color))
     
     def _compute_iou(self, bbox1, bbox2):
+        """
+        Calculates the Intersection over Union (IoU) of two bounding boxes.
+        
+        :param bbox1: list of bounding box edges [x1, y1, x2, y2] for current detection
+        :param bbox2: list of bounding box edges [x1, y1, x2, y2] for last stored detection for id
+        :return: overlap value of two bounding boxes to test against threshold
+        
+        """
         x1 = max(bbox1[0], bbox2[0])
         y1 = max(bbox1[1], bbox2[1])
         x2 = min(bbox1[2], bbox2[2])

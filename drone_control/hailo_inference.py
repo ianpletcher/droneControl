@@ -95,6 +95,10 @@ def on_new_hailo_sample(appsink, app_state):
     if result: 
         frame = np.frombuffer(map_info.data, dtype=np.uint8)
         frame = frame.reshape((height, width, 3))
+        buffer.unmap(map_info)
+    else :
+        logging.error("Failed to map buffer")
+        return Gst.FlowReturn.OK
         
     
     with app_state.frame_size_lock:
@@ -175,19 +179,19 @@ def on_new_hailo_sample(appsink, app_state):
         
     # Gathering data to serialize and send to ground station
     if not current_target_id: # if not tracking, update and display all detections within frame
-        logging.info("No target selected, sending all detections.")
+        logging.debug("No target selected, sending all detections.")
         with app_state.tracker_lock:
             tracked_objects = app_state.tracker.update_all_detections(current_detections_info, net_w, net_h)
             snapshot = tracked_objects.copy()  # cheap shallow snapshot of mapping
     
     else: # if tracking, save computation overhead by updating and displaying only target
-        logging.info(f"Tracking id {app_state.target_id}, sending only target detection")
+        logging.debug(f"Tracking id {app_state.target_id}, sending only target detection")
         with app_state.tracker_lock:
-            tracked_objects = app_state.tracker.update_target()
-            snapshot = tracked_objects.copy()
+            tracked_objects = app_state.tracker.update_target(current_detections_info, current_target_id, net_w, net_h)
+            snapshot = {current_target_id : tracked_objects}
 
     # FIXME: Move to a new function and call on input data, allowing use on single object or list of objects
-    
+
     try:
         # Sending to serializer
         # Ensure all values are native Python types (no numpy types) so msgpack
