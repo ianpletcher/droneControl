@@ -18,7 +18,7 @@ def select_target_by_click(click_pos, tracking_data, app_state):
         # If the click position is within the bounding box, we have found a target
         if (start_x) < click_pos[0] < (end_x) and (start_y) < click_pos[1] < (end_y):
             new_target_id = data['id']
-            logging.debug(f"Click at {click_pos} matched target ID {new_target_id} with bbox {data['bbox']}")
+            logging.info(f"Click at {click_pos} matched target ID {new_target_id} with bbox {data['bbox']}")
             found_target = True
             break
            
